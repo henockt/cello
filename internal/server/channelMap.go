@@ -26,7 +26,11 @@ func (cm *ChannelMap) add(key string, conn net.Conn) error {
 	if _, exists := cm.keyConn[key]; exists {
 		return errors.New("key already exists")
 	}
+	if _, exists := cm.connKey[conn]; exists {
+		return errors.New("connection already registered")
+	}
 	cm.keyConn[key] = conn
+	cm.connKey[conn] = key
 	return nil
 }
 
@@ -39,7 +43,19 @@ func (cm *ChannelMap) rem(key string) (net.Conn, error) {
 		return nil, errors.New("no connection with this key")
 	}
 	delete(cm.keyConn, key)
+	delete(cm.connKey, conn)
 	return conn, nil
+}
+
+func (cm *ChannelMap) getKey(conn net.Conn) (string, error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	key, exists := cm.connKey[conn]
+	if !exists {
+		return "", errors.New("no key with this connection")
+	}
+	return key, nil
 }
 
 func (cm *ChannelMap) get(key string) (net.Conn, error) {
