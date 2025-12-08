@@ -4,6 +4,7 @@ import (
 	"net"
 	"bufio"
 	"log"
+	"fmt"
 
 	"github.com/henockt/cello/internal/config"
 )
@@ -31,6 +32,7 @@ func (s *Server) StartChannel() {
 			log.Println("Failed to accept connection: ", err)
 			continue
 		}
+		log.Println("Client connected")
 		// Handle the connection concurrently
 		go s.handleClient(conn)
 	}
@@ -61,10 +63,10 @@ func (s *Server) handleClient(conn net.Conn) {
 		if msg == config.ChannelRequest {
 			key := data[4 : len(data) - 1]
 			if err := s.cm.add(key, conn); err != nil {
-				conn.Write([]byte(config.ChannelTaken))
+				fmt.Fprintf(conn, "%v\n", config.ChannelTaken)
 				log.Println(err)
 			} else {
-				conn.Write([]byte(config.ChannelSuccess))
+				fmt.Fprintf(conn, "%v\n", config.ChannelSuccess)
 				log.Printf("Client %s registered", key)
 			}
 		}
