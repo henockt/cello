@@ -1,10 +1,12 @@
 package client
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"net"
-	"bufio"
+	"strings"
 
 	"github.com/henockt/cello/internal/config"
 )
@@ -51,13 +53,47 @@ func (c *Client) ConnectServer() {
 			log.Print("name is not available, quitting...")
 			return
 		case config.ChannelPublish:
-			go c.handlePublish(data)
+			log.Print(data)
+			go handlePublish(data, c.LocalPort)
 		}
 	}
 }
 
 // connects to server and sends request id, PUB:<RequestId>:<length>
 // receives payload then proxies to local server
-func (c *Client) handlePublish(pub string) {
-	log.Println(pub)
+func handlePublish(pub string, localPort string) {
+	servConn, err := net.Dial("tcp", config.DataPort)
+	if err != nil {
+		log.Println("Error connecting to data listener")
+		return
+	}
+	defer servConn.Close()
+	
+	localConn, err := net.Dial("tcp", localPort)
+	if err != nil {
+		log.Println("Error connecting to local server")
+		return
+	}
+	defer localConn.Close()
+
+	reqId := strings.TrimPrefix(pub, config.ChannelPublish + ":")
+	_, err = servConn.Write([]byte(reqId + "\n"))
+	if err != nil {
+		log.Println("Error sending request id")
+		return
+	}
+
+	servReader := bufio.NewReader(servConn)
+	data, err := servReader.ReadString('\n')
+	if err != nil {
+		log.Println("Error reading ACK")
+		return
+	}
+	if strings.TrimSpace(data) != "OK" {
+		log.Println("Server rejected request", data)
+		return
+	}
+	
+	go io.Copy(localConn, servReader)
+	io.Copy(servConn, localConn)
 }
