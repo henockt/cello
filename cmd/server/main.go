@@ -5,12 +5,11 @@ import (
 )
 
 func main() {
+	myServer := server.NewServer()
 
-	server := server.Server{}
-
-
-	go server.StartPublic()
-	server.StartChannel()
+	go myServer.StartPublic()
+	go myServer.StartData()
+	myServer.StartChannel()
 	
-	select {}
+	// select {}
 }

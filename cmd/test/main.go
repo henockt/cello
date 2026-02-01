@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const PORT = 3001
+const PORT = 3002
 
 func main() {
 	http.HandleFunc("/", handler)
@@ -30,5 +30,5 @@ func main() {
 func handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("hello"))
+	w.Write([]byte("hello, from local server\n"))
 }

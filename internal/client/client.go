@@ -59,7 +59,7 @@ func (c *Client) ConnectServer() {
 	}
 }
 
-// connects to server and sends request id, PUB:<RequestId>:<length>
+// connects to server and sends request id, PUB:<RequestId>
 // receives payload then proxies to local server
 func handlePublish(pub string, localPort string) {
 	servConn, err := net.Dial("tcp", config.DataPort)
@@ -89,7 +89,7 @@ func handlePublish(pub string, localPort string) {
 		log.Println("Error reading ACK")
 		return
 	}
-	if strings.TrimSpace(data) != "OK" {
+	if strings.TrimSpace(data) != config.ChannelSuccess {
 		log.Println("Server rejected request", data)
 		return
 	}
