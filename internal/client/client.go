@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/henockt/cello/internal/config"
@@ -17,13 +18,13 @@ const (
 )
 
 type Client struct {
-	ClientId string
+	ClientId  string
 	LocalPort string
 }
 
 func NewClient(name, port string) *Client {
 	return &Client{
-		ClientId: name,
+		ClientId:  name,
 		LocalPort: port,
 	}
 }
@@ -125,8 +126,12 @@ func handlePublish(pub string, localPort string) {
 
 	log.Printf("Proxying request %s to local server at %s", reqId, localPort)
 
+	var wg sync.WaitGroup
+
 	// Bidirectional copy with error handling
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if _, err := io.Copy(localConn, servReader); err != nil && err != io.EOF {
 			log.Printf("Error copying server->local for request %s: %v", reqId, err)
 		}
@@ -136,6 +141,7 @@ func handlePublish(pub string, localPort string) {
 		log.Printf("Error copying local->server for request %s: %v", reqId, err)
 	}
 
+	wg.Wait()
 	log.Printf("Request %s completed", reqId)
 }
 
