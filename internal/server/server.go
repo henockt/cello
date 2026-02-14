@@ -155,14 +155,15 @@ func (s *Server) handlePublic(conn net.Conn) {
 	pub := fmt.Sprintf("%s:%s\n", config.ChannelPublish, requestId)
 	clientConn.Write([]byte(pub))
 
-	// go func(id string) {
-	// 	time.Sleep(5 * time.Second)
-	// 	if expiredConn, _ := s.cm.get(id); expiredConn != nil {
-	// 		log.Printf("Request %s timed out waiting for client dial-back", id)
-	// 		sendHTTPResp(expiredConn, 504, "Client agent timed out")
-	// 		expiredConn.Close()
-	// 	}
-	// }(requestId)
+	go func(id string) {
+		time.Sleep(10 * time.Second)
+		if expiredConn, _ := s.cm.get(id); expiredConn != nil {
+			log.Printf("Request %s timed out waiting for client dial-back", id)
+			sendHTTPResp(expiredConn, 504, "Client agent timed out")
+			expiredConn.Close()
+			s.cm.rem(id)
+		}
+	}(requestId)
 }
 
 func sendHTTPResp(conn net.Conn, code int, msg string) {
@@ -194,17 +195,31 @@ func (s *Server) handleData(conn net.Conn) {
 	defer conn.Close()
 
 	clientReader := bufio.NewReader(conn)
-	reqId, err := clientReader.ReadString('\n')
+	msg, err := clientReader.ReadString('\n')
 	if err != nil {
 		log.Printf("Error reading request id: %v", err)
 		return
 	}
 
-	reqId = strings.TrimSuffix(reqId, "\n")
-	if len(reqId) == 0 {
-		log.Println("Empty request id")
+	msg = strings.TrimSuffix(msg, "\n")
+	if len(msg) == 0 {
+		log.Println("Empty message")
 		return
 	}
+
+	// Check for error marker from client
+	if strings.HasPrefix(msg, config.ChannelError+":") {
+		reqId := strings.TrimPrefix(msg, config.ChannelError+":")
+		log.Printf("Client reported connection failure for request %s", reqId)
+		if pubConn, err := s.cm.get(reqId); err == nil {
+			sendHTTPResp(pubConn, 502, "Local server not responding")
+			pubConn.Close()
+		}
+		s.cm.rem(reqId)
+		return
+	}
+
+	reqId := msg
 	defer s.cm.rem(reqId)
 
 	// Send ACK

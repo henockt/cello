@@ -33,7 +33,7 @@ func (c *Client) ConnectServer() {
 	dialer := net.Dialer{Timeout: connectTimeout}
 	conn, err := dialer.Dial("tcp", config.ChannelPort)
 	if err != nil {
-		log.Fatalf("Failed to connect to server at %s: %v", config.ChannelPort, err)
+		log.Fatalf("Failed to connect to server at %s:\n%v", config.ChannelPort, err)
 	}
 	defer conn.Close()
 	log.Printf("Connected to server at %s", config.ChannelPort)
@@ -78,20 +78,6 @@ func (c *Client) ConnectServer() {
 func handlePublish(pub string, localPort string) {
 	dialer := net.Dialer{Timeout: connectTimeout}
 
-	servConn, err := dialer.Dial("tcp", config.DataPort)
-	if err != nil {
-		log.Printf("Failed to connect to data listener at %s: %v", config.DataPort, err)
-		return
-	}
-	defer servConn.Close()
-
-	localConn, err := dialer.Dial("tcp", localPort)
-	if err != nil {
-		log.Printf("Failed to connect to local server at %s: %v", localPort, err)
-		return
-	}
-	defer localConn.Close()
-
 	// Parse request ID from publish message: "PUB:requestId\n"
 	reqId := strings.TrimPrefix(pub, config.ChannelPublish+":")
 	reqId = strings.TrimSuffix(reqId, "\n")
@@ -100,6 +86,24 @@ func handlePublish(pub string, localPort string) {
 		log.Println("Invalid publish message: empty request id")
 		return
 	}
+
+	// Try to connect to local server first to fail fast if it's not available
+	localConn, err := dialer.Dial("tcp", localPort)
+	if err != nil {
+		log.Printf("Failed to connect to local server at %s: %v", localPort, err)
+		// Notify server that local connection failed so it can respond with error
+		notifyConnectionFailure(reqId)
+		return
+	}
+	defer localConn.Close()
+
+	// Now connect to data server after confirming local server exists
+	servConn, err := dialer.Dial("tcp", config.DataPort)
+	if err != nil {
+		log.Printf("Failed to connect to data listener at %s: %v", config.DataPort, err)
+		return
+	}
+	defer servConn.Close()
 
 	// Send request ID to server
 	if _, err := servConn.Write([]byte(reqId + "\n")); err != nil {
@@ -133,4 +137,20 @@ func handlePublish(pub string, localPort string) {
 	}
 
 	log.Printf("Request %s completed", reqId)
+}
+
+// notifyConnectionFailure connects to data server and signals that local connection failed
+func notifyConnectionFailure(reqId string) {
+	dialer := net.Dialer{Timeout: connectTimeout}
+	conn, err := dialer.Dial("tcp", config.DataPort)
+	if err != nil {
+		log.Printf("Failed to notify server of connection failure for request %s: %v", reqId, err)
+		return
+	}
+	defer conn.Close()
+
+	// Send error marker to data server
+	if _, err := conn.Write([]byte(config.ChannelError + ":" + reqId + "\n")); err != nil {
+		log.Printf("Failed to send error notification: %v", err)
+	}
 }
