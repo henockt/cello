@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/henockt/cello/internal/config"
@@ -126,22 +125,26 @@ func handlePublish(pub string, localPort string) {
 
 	log.Printf("Proxying request %s to local server at %s", reqId, localPort)
 
-	var wg sync.WaitGroup
-
-	// Bidirectional copy with error handling
-	wg.Add(1)
+	// Bidirectional copy using CloseWrite for proper EOF signaling
 	go func() {
-		defer wg.Done()
-		if _, err := io.Copy(localConn, servReader); err != nil && err != io.EOF {
-			log.Printf("Error copying server->local for request %s: %v", reqId, err)
+		if _, err := io.Copy(servConn, localConn); err != nil && err != io.EOF {
+			log.Printf("Error copying local->server for request %s: %v", reqId, err)
+		}
+		// Signal EOF to server reader by closing write side
+		if tc, ok := servConn.(interface{ CloseWrite() error }); ok {
+			tc.CloseWrite()
 		}
 	}()
 
-	if _, err := io.Copy(servConn, localConn); err != nil && err != io.EOF {
-		log.Printf("Error copying local->server for request %s: %v", reqId, err)
+	// Copy from server to local
+	if _, err := io.Copy(localConn, servReader); err != nil && err != io.EOF {
+		log.Printf("Error copying server->local for request %s: %v", reqId, err)
+	}
+	// Signal EOF to local reader by closing write side
+	if tc, ok := localConn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite()
 	}
 
-	wg.Wait()
 	log.Printf("Request %s completed", reqId)
 }
 

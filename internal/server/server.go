@@ -238,6 +238,21 @@ func (s *Server) handleData(conn net.Conn) {
 	// go io.Copy(io.MultiWriter(pubConn, os.Stdout), clientReader)
 	// io.Copy(io.MultiWriter(conn, os.Stdout), pubConn)
 
-	go io.Copy(pubConn, clientReader)
-	io.Copy(conn, pubConn)
+	// Bidirectional copy using CloseWrite for proper EOF signaling
+	go func() {
+		if _, err := io.Copy(pubConn, clientReader); err != nil && err != io.EOF {
+			log.Printf("Error copying dataConn->pubConn for request %s: %v", reqId, err)
+		}
+		if tc, ok := pubConn.(interface{ CloseWrite() error }); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+
+	if _, err := io.Copy(conn, pubConn); err != nil && err != io.EOF {
+		log.Printf("Error copying pubConn->dataConn for request %s: %v", reqId, err)
+	}
+	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite()
+	}
 }
