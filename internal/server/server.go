@@ -2,10 +2,10 @@ package server
 
 import (
 	"bufio"
-	// "bytes"
+	"bytes"
 	"fmt"
 	"io"
-	// "os"
+	"sync"
 	"log"
 	"net"
 	"strings"
@@ -104,66 +104,84 @@ func (s *Server) StartPublic() {
 			log.Println("Failed to accept public request: ", err)
 			continue
 		}
-		log.Println("Received public request from client")
+		log.Println("Received new public request")
 
 		go s.handlePublic(conn)
 	}
 }
 
 func (s *Server) handlePublic(conn net.Conn) {
-	// defer conn.Close() // must be closed by data handler after processing
+	buf := new(bytes.Buffer)
+	bufReader := bufio.NewReader(io.TeeReader(conn, buf))
+	key := extractSubdomain(bufReader)
 
-	// send PUB:<requestId> to 'subdomains' conn
-	// buf := new(bytes.Buffer)
-	// tee := io.TeeReader(conn, buf)
-
-	// reader := bufio.NewReader(tee)
-	// req, err := http.ReadRequest(reader)
-
-	// reader := bufio.NewReader(conn)
-	// req, err := http.ReadRequest(reader)
-	// if err != nil {
-	// 	log.Println("Error parsing request")
-	// 	return
-	// }
-
-	// key := strings.Split(req.Host, ".")[0]
-
-	/*
-		DEFAULT KEY
-	*/
-	key := "myapp"
-
-	// check for client conn existence
 	clientConn, err := s.cm.get(key)
 	if err != nil {
-		log.Printf("no client connection found for key '%s'", key)
 		sendHTTPResp(conn, 502, "Client not active")
+		conn.Close()
 		return
 	}
 
-	// assign a new unique key for the public request
 	requestId := fmt.Sprintf("%d", time.Now().UnixNano())
+	bufferedConn := &BufferedConn{Conn: conn, buffer: bytes.NewReader(buf.Bytes())}
 
-	// save (conn, requestId) pair for data listener to use
-	if err := s.cm.add(requestId, conn); err != nil {
-		log.Printf("Failed to add request %s: %v", requestId, err)
-		sendHTTPResp(conn, 500, "Internal server error")
+	if err := s.cm.add(requestId, bufferedConn); err != nil {
+		sendHTTPResp(bufferedConn, 500, "Internal server error")
+		bufferedConn.Close()
 		return
 	}
 
-	pub := fmt.Sprintf("%s:%s\n", config.ChannelPublish, requestId)
-	clientConn.Write([]byte(pub))
+	clientConn.Write([]byte(fmt.Sprintf("%s:%s\n", config.ChannelPublish, requestId)))
 
-	go func(id string) {
-		time.Sleep(10 * time.Second)
-		if expiredConn, _ := s.cm.get(id); expiredConn != nil {
-			log.Printf("Request %s timed out waiting for client dial-back", id)
-			sendHTTPResp(expiredConn, 504, "Client agent timed out")
-			expiredConn.Close()
-			s.cm.rem(id)
+	// go func(id string) {
+	// 	time.Sleep(15 * time.Second)
+	// 	if expConn, _ := s.cm.get(id); expConn != nil {
+	// 		sendHTTPResp(expConn, 504, "Client agent timed out")
+	// 		expConn.Close()
+	// 		s.cm.rem(id)
+	// 	}
+	// }(requestId)
+}
+
+// extractSubdomain reads HTTP headers and extracts subdomain from Host header
+func extractSubdomain(reader *bufio.Reader) string {
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "myapp"
 		}
-	}(requestId)
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return "myapp" // No Host header found
+		}
+		if strings.HasPrefix(strings.ToLower(line), "host:") {
+			host := strings.TrimPrefix(line[5:], " ")
+			if idx := strings.IndexByte(host, ':'); idx >= 0 {
+				host = host[:idx] // Remove port
+			}
+			subdomain := strings.Split(host, ".")[0]
+			log.Printf("Extracted subdomain: %s", subdomain)
+			return subdomain
+		}
+	}
+}
+
+// BufferedConn wraps a net.Conn and replays buffered data before reading from underlying connection
+type BufferedConn struct {
+	net.Conn
+	buffer          *bytes.Reader
+	bufferExhausted bool
+}
+
+func (bc *BufferedConn) Read(p []byte) (n int, err error) {
+	if !bc.bufferExhausted {
+		n, err := bc.buffer.Read(p)
+		if n > 0 {
+			return n, err
+		}
+		bc.bufferExhausted = true
+	}
+	return bc.Conn.Read(p)
 }
 
 func sendHTTPResp(conn net.Conn, code int, msg string) {
@@ -238,16 +256,17 @@ func (s *Server) handleData(conn net.Conn) {
 	// go io.Copy(io.MultiWriter(pubConn, os.Stdout), clientReader)
 	// io.Copy(io.MultiWriter(conn, os.Stdout), pubConn)
 
+	var wg sync.WaitGroup
+
 	// Bidirectional copy using CloseWrite for proper EOF signaling
-	go func() {
-		if _, err := io.Copy(pubConn, clientReader); err != nil && err != io.EOF {
+	wg.Go(func() {
+		if _, err := io.Copy(pubConn, conn); err != nil && err != io.EOF {
 			log.Printf("Error copying dataConn->pubConn for request %s: %v", reqId, err)
 		}
 		if tc, ok := pubConn.(interface{ CloseWrite() error }); ok {
 			tc.CloseWrite()
 		}
-	}()
-
+	})
 
 	if _, err := io.Copy(conn, pubConn); err != nil && err != io.EOF {
 		log.Printf("Error copying pubConn->dataConn for request %s: %v", reqId, err)
@@ -255,4 +274,8 @@ func (s *Server) handleData(conn net.Conn) {
 	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite()
 	}
+
+	wg.Wait()
+
+	log.Printf("Request %s completed", reqId)
 }
