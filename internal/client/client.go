@@ -7,13 +7,14 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/henockt/cello/internal/config"
 )
 
 const (
-	connectTimeout = 5 * time.Second
+	connectTimeout = 10 * time.Second
 )
 
 type Client struct {
@@ -87,8 +88,22 @@ func handlePublish(pub string, localPort string) {
 		return
 	}
 
-	// Try to connect to local server first to fail fast if it's not available
-	localConn, err := dialer.Dial("tcp", localPort)
+	// try several local addresses when caller provided only a port (":5173")
+	var localConn net.Conn
+	var err error
+	if strings.HasPrefix(localPort, ":") {
+		addrs := []string{"localhost", "127.0.0.1", "[::1]"}
+		for _, h := range addrs {
+			addr := h + localPort
+			localConn, err = dialer.Dial("tcp", addr)
+			if err == nil {
+				localPort = addr
+				break
+			}
+		}
+	} else {
+		localConn, err = dialer.Dial("tcp", localPort)
+	}
 	if err != nil {
 		log.Printf("Failed to connect to local server at %s: %v", localPort, err)
 		// Notify server that local connection failed so it can respond with error
@@ -125,8 +140,10 @@ func handlePublish(pub string, localPort string) {
 
 	log.Printf("Proxying request %s to local server at %s", reqId, localPort)
 
+	var wg sync.WaitGroup
+
 	// Bidirectional copy using CloseWrite for proper EOF signaling
-	go func() {
+	wg.Go(func() {
 		if _, err := io.Copy(servConn, localConn); err != nil && err != io.EOF {
 			log.Printf("Error copying local->server for request %s: %v", reqId, err)
 		}
@@ -134,16 +151,18 @@ func handlePublish(pub string, localPort string) {
 		if tc, ok := servConn.(interface{ CloseWrite() error }); ok {
 			tc.CloseWrite()
 		}
-	}()
+	})
 
 	// Copy from server to local
-	if _, err := io.Copy(localConn, servReader); err != nil && err != io.EOF {
+	if _, err := io.Copy(localConn, servConn); err != nil && err != io.EOF {
 		log.Printf("Error copying server->local for request %s: %v", reqId, err)
 	}
 	// Signal EOF to local reader by closing write side
 	if tc, ok := localConn.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite()
 	}
+
+	wg.Wait()
 
 	log.Printf("Request %s completed", reqId)
 }
