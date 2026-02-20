@@ -5,10 +5,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"sync"
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"net/http"

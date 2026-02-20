@@ -1,15 +1,15 @@
 package server
 
 import (
-	"net"
 	"errors"
+	"net"
 	"sync"
 )
 
 type ChannelMap struct {
 	keyConn map[string]net.Conn
 	connKey map[net.Conn]string
-	mu sync.Mutex
+	mu      sync.Mutex
 }
 
 func NewChannelMap() *ChannelMap {

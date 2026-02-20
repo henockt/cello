@@ -9,7 +9,7 @@ import (
 
 func main() {
 	name := flag.String("name", "myapp", "a name for your channel")
-	port := flag.Int("port", 3002, "port number for your local server")
+	port := flag.Int("port", 3000, "port number for your local server")
 
 	flag.Parse()
 

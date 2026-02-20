@@ -10,6 +10,6 @@ func main() {
 	go myServer.StartPublic()
 	go myServer.StartData()
 	myServer.StartChannel()
-	
+
 	// select {}
 }

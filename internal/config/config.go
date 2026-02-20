@@ -19,8 +19,3 @@ const (
 	ChannelError   = "ERR" // ERR:<RequestId>
 	// ChannelDataTransfer = "REQ"
 )
-
-// // fmt.Fprintf
-// func controlWrite(conn net.Conn, ) {
-
-// }
