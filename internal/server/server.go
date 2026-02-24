@@ -17,12 +17,14 @@ import (
 )
 
 type Server struct {
-	cm ChannelMap
+	cm ChannelMap // registered client channels, by channel name
+	rm ChannelMap // public request connections, by request ID
 }
 
 func NewServer() *Server {
 	return &Server{
 		cm: *NewChannelMap(),
+		rm: *NewChannelMap(),
 	}
 }
 
@@ -125,7 +127,7 @@ func (s *Server) handlePublic(conn net.Conn) {
 	requestId := fmt.Sprintf("%d", time.Now().UnixNano())
 	bufferedConn := &BufferedConn{Conn: conn, buffer: bytes.NewReader(buf.Bytes())}
 
-	if err := s.cm.add(requestId, bufferedConn); err != nil {
+	if err := s.rm.add(requestId, bufferedConn); err != nil {
 		sendHTTPResp(bufferedConn, 500, "Internal server error")
 		bufferedConn.Close()
 		return
@@ -135,10 +137,10 @@ func (s *Server) handlePublic(conn net.Conn) {
 
 	// go func(id string) {
 	// 	time.Sleep(15 * time.Second)
-	// 	if expConn, _ := s.cm.get(id); expConn != nil {
+	// 	if expConn, _ := s.rm.get(id); expConn != nil {
 	// 		sendHTTPResp(expConn, 504, "Client agent timed out")
 	// 		expConn.Close()
-	// 		s.cm.rem(id)
+	// 		s.rm.rem(id)
 	// 	}
 	// }(requestId)
 }
@@ -229,16 +231,16 @@ func (s *Server) handleData(conn net.Conn) {
 	if strings.HasPrefix(msg, config.ChannelError+":") {
 		reqId := strings.TrimPrefix(msg, config.ChannelError+":")
 		log.Printf("Client reported connection failure for request %s", reqId)
-		if pubConn, err := s.cm.get(reqId); err == nil {
+		if pubConn, err := s.rm.get(reqId); err == nil {
 			sendHTTPResp(pubConn, 502, "Local server not responding")
 			pubConn.Close()
 		}
-		s.cm.rem(reqId)
+		s.rm.rem(reqId)
 		return
 	}
 
 	reqId := msg
-	defer s.cm.rem(reqId)
+	defer s.rm.rem(reqId)
 
 	// Send ACK
 	if _, err := conn.Write([]byte(config.ChannelSuccess + "\n")); err != nil {
@@ -246,7 +248,7 @@ func (s *Server) handleData(conn net.Conn) {
 		return
 	}
 
-	pubConn, err := s.cm.get(reqId)
+	pubConn, err := s.rm.get(reqId)
 	if err != nil {
 		log.Printf("Error finding public connection for request %s: %v", reqId, err)
 		return
