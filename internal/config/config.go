@@ -19,3 +19,9 @@ const (
 	ChannelError   = "ERR" // ERR:<RequestId>
 	// ChannelDataTransfer = "REQ"
 )
+
+const (
+	// the maximum time the server waits for the client agent
+	// to claim a public request before responding with 504.
+	RequestTimeout = 30
+)

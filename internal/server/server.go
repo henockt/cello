@@ -135,14 +135,16 @@ func (s *Server) handlePublic(conn net.Conn) {
 
 	clientConn.Write([]byte(fmt.Sprintf("%s:%s\n", config.ChannelPublish, requestId)))
 
-	// go func(id string) {
-	// 	time.Sleep(15 * time.Second)
-	// 	if expConn, _ := s.rm.get(id); expConn != nil {
-	// 		sendHTTPResp(expConn, 504, "Client agent timed out")
-	// 		expConn.Close()
-	// 		s.rm.rem(id)
-	// 	}
-	// }(requestId)
+	go func(id string) {
+		time.Sleep(config.RequestTimeout * time.Second)
+		// rem is used as an atomic ownership claim: if it succeeds, the data
+		// handler has not yet claimed this request and we own the connection.
+		if expConn, err := s.rm.rem(id); err == nil {
+			log.Printf("Request %s timed out, sending 504", id)
+			sendHTTPResp(expConn, 504, "Client agent timed out")
+			expConn.Close()
+		}
+	}(requestId)
 }
 
 // extractSubdomain reads HTTP headers and extracts subdomain from Host header
