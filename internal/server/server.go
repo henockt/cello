@@ -25,16 +25,18 @@ type Ports struct {
 }
 
 type Server struct {
-	cfg Ports
-	cm  ChannelMap // registered client channels, by channel name
-	rm  ChannelMap // public request connections, by request ID
+	cfg            Ports
+	cm             ChannelMap // registered client channels, by channel name
+	rm             ChannelMap // public request connections, by request ID
+	DefaultChannel string     // fallback channel name for localhost/dev environments
 }
 
-func NewServer(cfg Ports) *Server {
+func NewServer(cfg Ports, defaultChannel string) *Server {
 	return &Server{
-		cfg: cfg,
-		cm:  *NewChannelMap(),
-		rm:  *NewChannelMap(),
+		cfg:            cfg,
+		cm:             *NewChannelMap(),
+		rm:             *NewChannelMap(),
+		DefaultChannel: defaultChannel,
 	}
 }
 
@@ -125,7 +127,7 @@ func (s *Server) StartPublic() {
 func (s *Server) handlePublic(conn net.Conn) {
 	buf := new(bytes.Buffer)
 	bufReader := bufio.NewReader(io.TeeReader(conn, buf))
-	key := extractSubdomain(bufReader)
+	key := extractSubdomain(bufReader, s.DefaultChannel)
 
 	clientConn, err := s.cm.get(key)
 	if err != nil {
@@ -157,23 +159,27 @@ func (s *Server) handlePublic(conn net.Conn) {
 	}(requestId)
 }
 
-// extractSubdomain reads HTTP headers and extracts subdomain from Host header
-func extractSubdomain(reader *bufio.Reader) string {
-	return "myapp"
-
+// extractSubdomain reads HTTP headers and extracts subdomain from Host header.
+// For localhost/127.0.0.1 (dev environments), it returns defaultChannel.
+func extractSubdomain(reader *bufio.Reader, defaultChannel string) string {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return "myapp"
+			return defaultChannel
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
-			return "myapp" // No Host header found
+			return defaultChannel // No Host header found
 		}
 		if strings.HasPrefix(strings.ToLower(line), "host:") {
 			host := strings.TrimPrefix(line[5:], " ")
 			if idx := strings.IndexByte(host, ':'); idx >= 0 {
 				host = host[:idx] // Remove port
+			}
+			// no subdomain to extract
+			if host == "localhost" || host == "127.0.0.1" {
+				log.Printf("Localhost detected, using default channel: %s", defaultChannel)
+				return defaultChannel
 			}
 			subdomain := strings.Split(host, ".")[0]
 			log.Printf("Extracted subdomain: %s", subdomain)
@@ -289,7 +295,7 @@ func (s *Server) handleData(conn net.Conn) {
 		}
 		// Close pubConn entirely so the request goroutine's Read unblocks.
 		pubConn.Close()
-	}) 
+	})
 
 	// Request path (HTTP client → client agent).
 	// HTTP clients never close their write side — they wait for the response.

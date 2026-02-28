@@ -57,12 +57,13 @@ curl http://localhost:3001 -H "Host: myapp.localhost"
 | `-channel-port` | `CELLO_CHANNEL_PORT` | `9000` | Client registration port |
 | `-public-port` | `CELLO_PUBLIC_PORT` | `3001` | Public HTTP port |
 | `-data-port` | `CELLO_DATA_PORT` | `9001` | Data transfer port |
+| `-default-channel` | `CELLO_DEFAULT_CHANNEL` | `myapp` | Fallback channel name for localhost/dev environments |
 
 **Client**
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `-name` | — | `myapp` | Channel name (used as subdomain) |
+| `-name` | `CELLO_DEFAULT_CHANNEL` | `myapp` | Channel name (used as subdomain) |
 | `-port` | — | `3000` | Local service port |
 | `-server` | `CELLO_SERVER_HOST` | `localhost` | cello server hostname or IP |
 | `-channel-port` | `CELLO_CHANNEL_PORT` | `9000` | Server channel port |

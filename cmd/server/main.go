@@ -23,6 +23,7 @@ func main() {
 	channelPort := flag.String("channel-port", envOrDefault("CELLO_CHANNEL_PORT", config.DefaultChannelPort), "port for client channel connections")
 	publicPort := flag.String("public-port", envOrDefault("CELLO_PUBLIC_PORT", config.DefaultPublicPort), "port for public HTTP connections")
 	dataPort := flag.String("data-port", envOrDefault("CELLO_DATA_PORT", config.DefaultDataPort), "port for data transfer connections")
+	defaultChannel := flag.String("default-channel", envOrDefault("CELLO_DEFAULT_CHANNEL", "myapp"), "default channel name for localhost/dev environments")
 
 	flag.Parse()
 
@@ -32,7 +33,7 @@ func main() {
 		DataPort:    fmt.Sprintf(":%s", *dataPort),
 	}
 
-	myServer := server.NewServer(cfg)
+	myServer := server.NewServer(cfg, *defaultChannel)
 
 	go myServer.StartPublic()
 	go myServer.StartData()
