@@ -1,46 +1,31 @@
-# cello
-
-A lightweight reverse proxy and tunneling system that exposes local services to the public internet. Built with Go, cello enables communication between clients and public-facing servers without requiring direct internet access.
-
-## Overview
-
-cello is a client-server application similar to ngrok that allows you to:
-- Register your local services with a central server
-- Expose local applications publicly through subdomain routing
-- Enable bidirectional communication through a three-channel protocol
-- Handle multiple concurrent client connections
-
-## Architecture
-
-cello uses a three-tier communication model:
-
-### Communication Channels
-
-1. **Channel Port** (`:9000`) - Client Registration
-   - Clients connect and register with a unique channel ID
-   - Uses the `SUB:<ChannelId>` protocol for registration
-   - Server sends back `ACK` or `TAK` (taken) responses
-
-2. **Public Port** (`:3001`) - HTTP Request Router
-   - Receives incoming HTTP requests from the public internet
-   - Extracts subdomain information from Host headers
-   - Maps subdomains to registered client channels
-   - Forwards valid requests to the appropriate client
-
-3. **Data Port** (`:9001`) - Bidirectional Data Transfer
-   - Handles actual data transfer between clients and public requesters
-   - Maintains request context and manages connections
-   - Supports bidirectional proxying with proper EOF signaling
+<h2 align="center">
+    cello
+</h2>
 
 
-## Quick Start
+<p align="center">
+    A lightweight reverse proxy that exposes local services to the public internet.
+</p>
+<p align="center">
+    <a href="https://github.com/henockt/cello/blob/main/LICENSE">
+        <img alt="cello is released under the MIT license." src="https://img.shields.io/badge/license-MIT-blue.svg"/></a>
+</p>
 
-### Prerequisites
+## How it works
 
-- Go 1.25 or later
-- Make (optional, for convenience)
+cello uses three ports:
 
-### Installation
+| Port | Default | Purpose |
+|------|---------|---------|
+| Channel | `9000` | Client registration |
+| Public | `3001` | Incoming HTTP requests (subdomain-routed) |
+| Data | `9001` | Bidirectional data transfer |
+
+A client registers with a name (e.g. `myapp`). Requests to `myapp.<host>` on the public port are forwarded to the client, which proxies them to a local service. The server returns `504` if the client does not claim a request within 30 seconds.
+
+![System Architecture](./assets/diagram.svg)
+
+## Quick start
 
 ```bash
 git clone https://github.com/henockt/cello.git
@@ -48,88 +33,42 @@ cd cello
 go mod download
 ```
 
-### Building
-
 ```bash
-# Build server
-go build -o bin/server ./cmd/server
+# Terminal 1 – server
+go run cmd/server/main.go
 
-# Build client
-go build -o bin/client ./cmd/client
+# Terminal 2 – local service to expose
+go run cmd/test/main.go
+
+# Terminal 3 – client
+go run cmd/client/main.go -name myapp -port 3000
+
+# Terminal 4 – test
+curl http://localhost:3001 -H "Host: myapp.localhost"
+# → hello, from local server
 ```
 
-### Running
+## Options
 
-#### Development Mode (local)
+**Server**
 
-```bash
-make dev
-```
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `-channel-port` | `CELLO_CHANNEL_PORT` | `9000` | Client registration port |
+| `-public-port` | `CELLO_PUBLIC_PORT` | `3001` | Public HTTP port |
+| `-data-port` | `CELLO_DATA_PORT` | `9001` | Data transfer port |
 
-This starts both server and client with default settings.
+**Client**
 
-#### Production Mode
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `-name` | — | `myapp` | Channel name (used as subdomain) |
+| `-port` | — | `3000` | Local service port |
+| `-server` | `CELLO_SERVER_HOST` | `localhost` | cello server hostname or IP |
+| `-channel-port` | `CELLO_CHANNEL_PORT` | `9000` | Server channel port |
+| `-data-port` | `CELLO_DATA_PORT` | `9001` | Server data port |
 
-**Start the server:**
-```bash
-./bin/server
-```
-
-**Start a client (in another terminal):**
-```bash
-./bin/client -name myapp -port 3000
-```
-
-### Options
-
-**Server** - No command-line options (uses hardcoded ports)
-
-**Client:**
-- `-name` (default: `myapp`) - Unique identifier for your channel
-- `-port` (default: `3000`) - Local port of the service to expose
-
-## Usage
-
-### Scenario: Expose a local test server
-
-1. **Terminal 1 - Start cello server:**
-   ```bash
-   go run cmd/server/main.go
-   ```
-
-2. **Terminal 2 - Start the test server:**
-   ```bash
-   go run cmd/test/main.go
-   ```
-   This starts a simple HTTP server on port 3000 that responds with "hello, from local server".
-
-3. **Terminal 3 - Start cello client:**
-   ```bash
-   go run cmd/client/main.go -name myapp -port 3000
-   ```
-
-4. **Access through cello:**
-   - In Terminal 4, test the tunnel:
-     ```bash
-     curl http://localhost:3001 -H "Host: myapp.localhost"
-     ```
-   - You should see: `hello, from local server`
-   - Your request was routed through the cello server to your local service
-
-## Configuration
-
-All configuration is hardcoded in [internal/config/config.go](internal/config/config.go):
-
-- **Channel Port**: `:9000`
-- **Data Port**: `:9001`
-- **Public Port**: `:3001`
-
-To customize ports, modify the constants in the config file and rebuild.
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
-
-## Contact
-
-For questions or issues, please open an issue on the GitHub repository.
+MIT

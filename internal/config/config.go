@@ -5,10 +5,11 @@ This package includes common communication
 configurations between client and server
 */
 
+// Default ports (no leading colon). Used as fallbacks when no flag or env var is set.
 const (
-	ChannelPort = ":9000"
-	DataPort    = ":9001"
-	PublicPort  = ":3001"
+	DefaultChannelPort = "9000"
+	DefaultDataPort    = "9001"
+	DefaultPublicPort  = "3001"
 )
 
 const (

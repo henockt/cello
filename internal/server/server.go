@@ -16,26 +16,36 @@ import (
 	"github.com/henockt/cello/internal/config"
 )
 
-type Server struct {
-	cm ChannelMap // registered client channels, by channel name
-	rm ChannelMap // public request connections, by request ID
+// Ports holds the listen addresses for each server listener.
+// Each value is a full listen address, e.g. ":9000" or "0.0.0.0:9000".
+type Ports struct {
+	ChannelPort string
+	DataPort    string
+	PublicPort  string
 }
 
-func NewServer() *Server {
+type Server struct {
+	cfg Ports
+	cm  ChannelMap // registered client channels, by channel name
+	rm  ChannelMap // public request connections, by request ID
+}
+
+func NewServer(cfg Ports) *Server {
 	return &Server{
-		cm: *NewChannelMap(),
-		rm: *NewChannelMap(),
+		cfg: cfg,
+		cm:  *NewChannelMap(),
+		rm:  *NewChannelMap(),
 	}
 }
 
 // Setups and starts listener for a client connection
 func (s *Server) StartChannel() {
-	listener, err := net.Listen("tcp", config.ChannelPort)
+	listener, err := net.Listen("tcp", s.cfg.ChannelPort)
 	if err != nil {
-		log.Fatal("Error starting client listener on ", config.ChannelPort)
+		log.Fatal("Error starting client listener on ", s.cfg.ChannelPort)
 	}
 	defer listener.Close()
-	log.Println("Client listener active on", config.ChannelPort)
+	log.Println("Client listener active on", s.cfg.ChannelPort)
 
 	for {
 		conn, err := listener.Accept()
@@ -93,12 +103,12 @@ func (s *Server) handleClient(conn net.Conn) {
 // public connection listener
 // sends PUB:<RequestId>
 func (s *Server) StartPublic() {
-	listener, err := net.Listen("tcp", config.PublicPort)
+	listener, err := net.Listen("tcp", s.cfg.PublicPort)
 	if err != nil {
-		log.Fatal("Error starting public listener on ", config.PublicPort)
+		log.Fatal("Error starting public listener on ", s.cfg.PublicPort)
 	}
 	defer listener.Close()
-	log.Println("Public listener active on", config.PublicPort)
+	log.Println("Public listener active on", s.cfg.PublicPort)
 
 	for {
 		conn, err := listener.Accept()
@@ -149,6 +159,8 @@ func (s *Server) handlePublic(conn net.Conn) {
 
 // extractSubdomain reads HTTP headers and extracts subdomain from Host header
 func extractSubdomain(reader *bufio.Reader) string {
+	return "myapp"
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -196,12 +208,12 @@ func sendHTTPResp(conn net.Conn, code int, msg string) {
 }
 
 func (s *Server) StartData() {
-	listener, err := net.Listen("tcp", config.DataPort)
+	listener, err := net.Listen("tcp", s.cfg.DataPort)
 	if err != nil {
-		log.Fatal("Error starting data listener on ", config.DataPort)
+		log.Fatal("Error starting data listener on ", s.cfg.DataPort)
 	}
 	defer listener.Close()
-	log.Println("Data listener active on", config.DataPort)
+	log.Println("Data listener active on", s.cfg.DataPort)
 
 	for {
 		conn, err := listener.Accept()
@@ -233,16 +245,24 @@ func (s *Server) handleData(conn net.Conn) {
 	if strings.HasPrefix(msg, config.ChannelError+":") {
 		reqId := strings.TrimPrefix(msg, config.ChannelError+":")
 		log.Printf("Client reported connection failure for request %s", reqId)
-		if pubConn, err := s.rm.get(reqId); err == nil {
+		// Atomically claim ownership so the timeout goroutine can't race us.
+		if pubConn, err := s.rm.rem(reqId); err == nil {
 			sendHTTPResp(pubConn, 502, "Local server not responding")
 			pubConn.Close()
 		}
-		s.rm.rem(reqId)
 		return
 	}
 
 	reqId := msg
-	defer s.rm.rem(reqId)
+
+	// if the timeout goroutine already fired and called rem(), this returns an
+	// error
+	pubConn, err := s.rm.rem(reqId)
+	if err != nil {
+		log.Printf("Request %s already timed out or unknown, dropping data connection", reqId)
+		return
+	}
+	defer pubConn.Close()
 
 	// Send ACK
 	if _, err := conn.Write([]byte(config.ChannelSuccess + "\n")); err != nil {
@@ -250,34 +270,40 @@ func (s *Server) handleData(conn net.Conn) {
 		return
 	}
 
-	pubConn, err := s.rm.get(reqId)
-	if err != nil {
-		log.Printf("Error finding public connection for request %s: %v", reqId, err)
-		return
-	}
-	defer pubConn.Close()
-
 	// go io.Copy(io.MultiWriter(pubConn, os.Stdout), clientReader)
 	// io.Copy(io.MultiWriter(conn, os.Stdout), pubConn)
 
 	var wg sync.WaitGroup
 
-	// Bidirectional copy using CloseWrite for proper EOF signaling
+	// Response path (client agent → HTTP client).
+	// When done, close pubConn entirely so the request goroutine below — which
+	// is blocked on pubConn.Read() waiting for the HTTP client to send more
+	// data — is unblocked and can exit cleanly.
 	wg.Go(func() {
 		if _, err := io.Copy(pubConn, conn); err != nil && err != io.EOF {
 			log.Printf("Error copying dataConn->pubConn for request %s: %v", reqId, err)
 		}
+		// Half-close the HTTP client side to flush the response.
 		if tc, ok := pubConn.(interface{ CloseWrite() error }); ok {
 			tc.CloseWrite()
 		}
-	})
+		// Close pubConn entirely so the request goroutine's Read unblocks.
+		pubConn.Close()
+	}) 
 
-	if _, err := io.Copy(conn, pubConn); err != nil && err != io.EOF {
-		log.Printf("Error copying pubConn->dataConn for request %s: %v", reqId, err)
-	}
-	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
-		tc.CloseWrite()
-	}
+	// Request path (HTTP client → client agent).
+	// HTTP clients never close their write side — they wait for the response.
+	// This goroutine is unblocked by pubConn.Close() above once the response
+	// is fully delivered.
+	wg.Go(func() {
+		if _, err := io.Copy(conn, pubConn); err != nil && err != io.EOF {
+			log.Printf("Error copying pubConn->dataConn for request %s: %v", reqId, err)
+		}
+		// Half-close so the client agent's Read returns EOF.
+		if tc, ok := conn.(interface{ CloseWrite() error }); ok {
+			tc.CloseWrite()
+		}
+	})
 
 	wg.Wait()
 

@@ -18,26 +18,30 @@ const (
 )
 
 type Client struct {
-	ClientId  string
-	LocalPort string
+	ClientId    string
+	LocalPort   string
+	channelAddr string // e.g. "host:9000"
+	dataAddr    string // e.g. "host:9001"
 }
 
-func NewClient(name, port string) *Client {
+func NewClient(name, port, channelAddr, dataAddr string) *Client {
 	return &Client{
-		ClientId:  name,
-		LocalPort: port,
+		ClientId:    name,
+		LocalPort:   port,
+		channelAddr: channelAddr,
+		dataAddr:    dataAddr,
 	}
 }
 
 // connect to server
 func (c *Client) ConnectServer() {
 	dialer := net.Dialer{Timeout: connectTimeout}
-	conn, err := dialer.Dial("tcp", config.ChannelPort)
+	conn, err := dialer.Dial("tcp", c.channelAddr)
 	if err != nil {
-		log.Fatalf("Failed to connect to server at %s:\n%v", config.ChannelPort, err)
+		log.Fatalf("Failed to connect to server at %s:\n%v", c.channelAddr, err)
 	}
 	defer conn.Close()
-	log.Printf("Connected to server at %s", config.ChannelPort)
+	log.Printf("Connected to server at %s", c.channelAddr)
 
 	// send SUB:<ClientId> and wait for response
 	request := fmt.Sprintf("%s:%s\n", config.ChannelRequest, c.ClientId)
@@ -67,7 +71,7 @@ func (c *Client) ConnectServer() {
 			return
 		case config.ChannelPublish:
 			log.Printf("Received publish request: %s", strings.TrimSpace(data))
-			go handlePublish(data, c.LocalPort)
+			go handlePublish(data, c.LocalPort, c.dataAddr)
 		default:
 			log.Printf("Unknown message type: %s", msg)
 		}
@@ -76,7 +80,7 @@ func (c *Client) ConnectServer() {
 
 // connects to server and sends request id, PUB:<RequestId>
 // receives payload then proxies to local server
-func handlePublish(pub string, localPort string) {
+func handlePublish(pub string, localPort string, dataAddr string) {
 	dialer := net.Dialer{Timeout: connectTimeout}
 
 	// Parse request ID from publish message: "PUB:requestId\n"
@@ -107,15 +111,15 @@ func handlePublish(pub string, localPort string) {
 	if err != nil {
 		log.Printf("Failed to connect to local server at %s: %v", localPort, err)
 		// Notify server that local connection failed so it can respond with error
-		notifyConnectionFailure(reqId)
+		notifyConnectionFailure(reqId, dataAddr)
 		return
 	}
 	defer localConn.Close()
 
 	// Now connect to data server after confirming local server exists
-	servConn, err := dialer.Dial("tcp", config.DataPort)
+	servConn, err := dialer.Dial("tcp", dataAddr)
 	if err != nil {
-		log.Printf("Failed to connect to data listener at %s: %v", config.DataPort, err)
+		log.Printf("Failed to connect to data listener at %s: %v", dataAddr, err)
 		return
 	}
 	defer servConn.Close()
@@ -153,8 +157,9 @@ func handlePublish(pub string, localPort string) {
 		}
 	})
 
-	// Copy from server to local
-	if _, err := io.Copy(localConn, servConn); err != nil && err != io.EOF {
+	// Copy from server to local (use servReader to avoid losing bytes
+	// already buffered after the ACK line).
+	if _, err := io.Copy(localConn, servReader); err != nil && err != io.EOF {
 		log.Printf("Error copying server->local for request %s: %v", reqId, err)
 	}
 	// Signal EOF to local reader by closing write side
@@ -168,9 +173,9 @@ func handlePublish(pub string, localPort string) {
 }
 
 // notifyConnectionFailure connects to data server and signals that local connection failed
-func notifyConnectionFailure(reqId string) {
+func notifyConnectionFailure(reqId string, dataAddr string) {
 	dialer := net.Dialer{Timeout: connectTimeout}
-	conn, err := dialer.Dial("tcp", config.DataPort)
+	conn, err := dialer.Dial("tcp", dataAddr)
 	if err != nil {
 		log.Printf("Failed to notify server of connection failure for request %s: %v", reqId, err)
 		return
