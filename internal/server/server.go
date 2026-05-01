@@ -195,13 +195,17 @@ type BufferedConn struct {
 	bufferExhausted bool
 }
 
-func (bc *BufferedConn) Read(p []byte) (n int, err error) {
+func (bc *BufferedConn) Read(p []byte) (int, error) {
 	if !bc.bufferExhausted {
 		n, err := bc.buffer.Read(p)
+		// bytes.Reader's EOF is about the buffer, not the conn. drop it
+		if err == io.EOF {
+			bc.bufferExhausted = true
+			err = nil
+		}
 		if n > 0 {
 			return n, err
 		}
-		bc.bufferExhausted = true
 	}
 	return bc.Conn.Read(p)
 }
