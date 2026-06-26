@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"io"
 	"net"
 	"strings"
@@ -76,6 +77,38 @@ func TestExtractSubdomain(t *testing.T) {
 				t.Errorf("extractSubdomain() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewRequestID(t *testing.T) {
+	const draws = 10000
+
+	seen := make(map[string]struct{}, draws)
+	for i := 0; i < draws; i++ {
+		id, err := newRequestID()
+		if err != nil {
+			t.Fatalf("newRequestID() error: %v", err)
+		}
+
+		// 16 random bytes, base64url (no padding) means 22 chars.
+		if len(id) != 22 {
+			t.Fatalf("newRequestID() = %q, want length 22", id)
+		}
+
+		// Must decode back to exactly 16 bytes
+		b, err := base64.RawURLEncoding.DecodeString(id)
+		if err != nil {
+			t.Fatalf("newRequestID() = %q, not valid base64url: %v", id, err)
+		}
+		if len(b) != 16 {
+			t.Fatalf("newRequestID() decoded to %d bytes, want 16", len(b))
+		}
+
+		// no collisions across many draws.
+		if _, dup := seen[id]; dup {
+			t.Fatalf("newRequestID() produced duplicate %q after %d draws", id, i)
+		}
+		seen[id] = struct{}{}
 	}
 }
 

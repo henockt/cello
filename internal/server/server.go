@@ -3,6 +3,8 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -68,8 +70,8 @@ func (s *Server) handleClient(conn net.Conn) {
 	for {
 		data, err := reader.ReadString('\n')
 		if err != nil {
-			key, err := s.cm.getKey(conn)
-			if err != nil {
+			key, errk := s.cm.getKey(conn)
+			if errk != nil {
 				log.Println("Client disconnected - not registered")
 				return
 			}
@@ -136,7 +138,13 @@ func (s *Server) handlePublic(conn net.Conn) {
 		return
 	}
 
-	requestId := fmt.Sprintf("%d", time.Now().UnixNano())
+	requestId, err := newRequestID()
+	if err != nil {
+		log.Printf("Failed to generate request id: %v", err)
+		sendHTTPResp(conn, 500, "Internal server error")
+		conn.Close()
+		return
+	}
 	bufferedConn := &BufferedConn{Conn: conn, buffer: bytes.NewReader(buf.Bytes())}
 
 	if err := s.rm.add(requestId, bufferedConn); err != nil {
@@ -157,6 +165,16 @@ func (s *Server) handlePublic(conn net.Conn) {
 			expConn.Close()
 		}
 	}(requestId)
+}
+
+// newRequestID returns a random, URL-safe request identifier
+// request IDs must be unguessable
+func newRequestID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // extractSubdomain reads HTTP headers and extracts subdomain from Host header.
