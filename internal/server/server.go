@@ -65,6 +65,7 @@ func (s *Server) StartChannel() {
 
 func (s *Server) handleClient(conn net.Conn) {
 	defer conn.Close()
+	enableKeepAlive(conn)
 	reader := bufio.NewReader(conn)
 
 	for {
@@ -101,6 +102,15 @@ func (s *Server) handleClient(conn net.Conn) {
 				log.Printf("Client %s registered", key)
 			}
 		}
+	}
+}
+
+// enableKeepAlive turns on TCP keepalive so dead connections are detected and
+// cleaned up instead of lingering. No-op for non-TCP connections.
+func enableKeepAlive(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(30 * time.Second)
 	}
 }
 
