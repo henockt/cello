@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -245,6 +247,64 @@ func sendHTTPResp(conn net.Conn, code int, msg string) {
 	}
 }
 
+// idleTimeout bounds how long a relayed connection may sit with neither side
+// sending before the server reclaims it. A transparent TCP tunnel cannot know
+// where an HTTP response ends, so on an HTTP/1.1 keepalive request neither the
+// local service nor the browser closes and the relay would otherwise pin two
+// connections and two goroutines indefinitely.
+const idleTimeout = 2 * time.Minute
+
+// deadlineSetter is the subset of net.Conn that copyIdle needs to bound a read.
+type deadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+// copyIdle copies src into dst, refreshing a read deadline on dl before every
+// read so a silent peer is reclaimed after idle rather than blocking forever.
+// src and dl are separate because the response path reads through a
+// bufio.Reader while the deadline belongs to the connection underneath it.
+// io.Copy cannot be used here: it would never refresh the deadline, and
+// bufio.Reader's WriteTo would bypass the loop entirely.
+func copyIdle(dst io.Writer, src io.Reader, dl deadlineSetter, idle time.Duration) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var total int64
+
+	for {
+		if err := dl.SetReadDeadline(time.Now().Add(idle)); err != nil {
+			return total, err
+		}
+
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			w, werr := dst.Write(buf[:n])
+			total += int64(w)
+			if werr != nil {
+				return total, werr
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return total, nil
+			}
+			return total, rerr
+		}
+	}
+}
+
+// logRelayErr reports a relay copy failure, staying quiet about the two errors
+// that are how a relay normally ends: net.ErrClosed, which is how the sibling
+// goroutine's deliberate Close unblocks a pending Read, and a deadline expiry,
+// which is the idle reclaim working as intended.
+func logRelayErr(dir, reqId string, err error) {
+	switch {
+	case errors.Is(err, net.ErrClosed):
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		log.Printf("Request %s idle for %s, closing %s relay", reqId, idleTimeout, dir)
+	default:
+		log.Printf("Error copying %s for request %s: %v", dir, reqId, err)
+	}
+}
+
 func (s *Server) StartData() {
 	listener, err := net.Listen("tcp", s.cfg.DataPort)
 	if err != nil {
@@ -265,6 +325,7 @@ func (s *Server) StartData() {
 
 func (s *Server) handleData(conn net.Conn) {
 	defer conn.Close()
+	enableKeepAlive(conn)
 
 	clientReader := bufio.NewReader(conn)
 	msg, err := clientReader.ReadString('\n')
@@ -313,13 +374,16 @@ func (s *Server) handleData(conn net.Conn) {
 
 	var wg sync.WaitGroup
 
-	// Response path (client agent → HTTP client).
-	// When done, close pubConn entirely so the request goroutine below — which
+	// Response path (client agent -> HTTP client).
+	// Copies from clientReader, not conn: the bufio.Reader that consumed the
+	// request-ID line above may also hold payload bytes that arrived in the
+	// same read, and reading the bare conn would discard them.
+	// When done, close pubConn entirely so the request goroutine below which
 	// is blocked on pubConn.Read() waiting for the HTTP client to send more
 	// data — is unblocked and can exit cleanly.
 	wg.Go(func() {
-		if _, err := io.Copy(pubConn, conn); err != nil && err != io.EOF {
-			log.Printf("Error copying dataConn->pubConn for request %s: %v", reqId, err)
+		if _, err := copyIdle(pubConn, clientReader, conn, idleTimeout); err != nil {
+			logRelayErr("dataConn->pubConn", reqId, err)
 		}
 		// Half-close the HTTP client side to flush the response.
 		if tc, ok := pubConn.(interface{ CloseWrite() error }); ok {
@@ -329,13 +393,13 @@ func (s *Server) handleData(conn net.Conn) {
 		pubConn.Close()
 	})
 
-	// Request path (HTTP client → client agent).
-	// HTTP clients never close their write side — they wait for the response.
+	// Request path (HTTP client -> client agent).
+	// HTTP clients never close their write side. they wait for the response.
 	// This goroutine is unblocked by pubConn.Close() above once the response
-	// is fully delivered.
+	// is fully delivered, or by its own idle deadline.
 	wg.Go(func() {
-		if _, err := io.Copy(conn, pubConn); err != nil && err != io.EOF {
-			log.Printf("Error copying pubConn->dataConn for request %s: %v", reqId, err)
+		if _, err := copyIdle(conn, pubConn, pubConn, idleTimeout); err != nil {
+			logRelayErr("pubConn->dataConn", reqId, err)
 		}
 		// Half-close so the client agent's Read returns EOF.
 		if tc, ok := conn.(interface{ CloseWrite() error }); ok {
