@@ -11,6 +11,24 @@
         <img alt="cello is released under the MIT license." src="https://img.shields.io/badge/license-MIT-blue.svg"/></a>
 </p>
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/henockt/cello/main/install.sh | sh
+```
+
+Then expose whatever is running locally:
+
+```bash
+cello 3000
+# Tunnel live: https://k7m2xq.cello.example.com -> localhost:3000
+```
+
+Released binaries already point at a server, so there is nothing to configure.
+Windows builds are on the [releases page](https://github.com/henockt/cello/releases);
+`go install github.com/henockt/cello/cmd/client@latest` works too, though a
+binary built that way defaults to `localhost` and needs `-server`.
+
 ## How it works
 
 cello serves everything on one port:
@@ -96,73 +114,10 @@ tunnel.
 | `-tls-skip-verify` | `CELLO_TLS_SKIP_VERIFY` | `false` | Accept any certificate (unsafe) |
 
 
-## Deploying
+## Deploying your own
 
-cello expects a reverse proxy in front to terminate TLS. It never handles
-certificates itself, and it does not listen on 443, the proxy does, and
-forwards to cello on loopback.
-
-The proxy is the only thing the firewall needs to expose.
-
-```bash
-xcaddy build --with github.com/caddy-dns/<your-provider> \
-             --with github.com/mholt/caddy-ratelimit
-```
-
-```
-*.cello.example.com, cello.example.com {
-    tls { dns <your-provider> {env.API_TOKEN} }
-
-    rate_limit {
-        zone registrations {
-            match {
-                host cello.example.com
-                path /_cello/channel
-            }
-            key         {remote_host}
-            window      1m
-            events      5
-            ipv6_prefix 64
-        }
-    }
-
-    reverse_proxy 127.0.0.1:3001 {
-        stream_timeout 2h
-    }
-}
-```
-
-The site block must cover the apex as well as the wildcard.
-
-`rate_limit` caps how fast one address can open tunnels. Registration is an
-ordinary HTTP request before the upgrade, so the proxy sees the real client
-address and can limit it. `ipv6_prefix 64` keys on the prefix, since a single
-host usually gets a whole /64.
-
-`stream_timeout` is the lifetime of a tunnel. It bounds how long any one session
-can live, and recycles names. Set it to `0` only if you want tunnels to live
-until a peer closes. note that it also cuts off a single request that runs longer
-than the timeout.
-
-```bash
-# on the server, a port above 1024, bound to loopback
-cello-server -listen 127.0.0.1:3001 -public-base https://cello.example.com
-
-# on your machine, 443 is the proxy, and is the default
-cello-client -server cello.example.com -port 3000
-```
-<!-- 
-### Without a proxy
-
-cello speaks plain HTTP, so running it directly on a public port means tunnel
-traffic and client connections are both unencrypted. For local testing that is
-fine; pick any port above 1024 and turn TLS off on the client. `-public-base`
-must carry the port, since it is the only source of the URLs handed to clients:
-
-```bash
-cello-server -listen :3001 -public-base http://cello.example.com:3001
-cello-client -server cello.example.com -server-port 3001 -tls=false -port 3000
-``` -->
+cello expects a reverse proxy in front to terminate TLS.
+[DEPLOYMENT.md](DEPLOYMENT.md) covers Caddy, nginx and DNS.
 
 ## License
 
