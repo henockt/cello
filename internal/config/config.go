@@ -5,16 +5,19 @@ This package includes common communication
 configurations between client and server
 */
 
-// Default ports (no leading colon). Used as fallbacks when no flag or env var is set.
+// Control endpoints. clients reach these on the server's own host and upgrade
+// the connection, everything else is visitor traffic for a tunnel.
 const (
-	DefaultChannelPort = "9000"
-	DefaultDataPort    = "9001"
-	DefaultPublicPort  = "3001"
+	ControlPrefix = "/_cello/"
+	ChannelPath   = "/_cello/channel"
+	DataPath      = "/_cello/data"
+
+	// the protocol named in the Upgrade header
+	UpgradeToken = "cello"
 )
 
-// Channel-port verbs. Every frame is a single newline-terminated line whose
-// first three bytes name the verb; anything after the first ':' is payload, so
-// a payload may itself contain ':' (a tunnel URL does).
+// Channel verbs. each frame is one line, the first three bytes name the verb
+// and anything after the first ':' is payload.
 const (
 	ChannelRequest = "SUB" // SUB:<name>, or bare SUB / SUB: to be assigned one
 	ChannelSuccess = "ACK" // ACK:<url> on the channel port; bare ACK on the data port
@@ -24,8 +27,8 @@ const (
 	ChannelError   = "ERR" // ERR:<RequestId>
 )
 
-// NAK codes. The client decides whether a retry is worthwhile from the code,
-// and shows the accompanying message to the user verbatim.
+// NAK codes. the client retries or gives up based on the code, and shows the
+// message to the user as-is.
 const (
 	NakTaken    = "taken"    // name is in use, another name may work
 	NakInvalid  = "invalid"  // name is malformed, or the request made no sense

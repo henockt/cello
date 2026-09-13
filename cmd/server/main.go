@@ -2,13 +2,11 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/henockt/cello/internal/config"
 	"github.com/henockt/cello/internal/server"
 )
 
@@ -32,20 +30,14 @@ func envBool(env string, def bool) bool {
 
 func main() {
 	// Priority: flag > env var > built-in default
-	channelPort := flag.String("channel-port", envOrDefault("CELLO_CHANNEL_PORT", config.DefaultChannelPort), "port for client channel connections")
-	publicPort := flag.String("public-port", envOrDefault("CELLO_PUBLIC_PORT", config.DefaultPublicPort), "port for public HTTP connections")
-	dataPort := flag.String("data-port", envOrDefault("CELLO_DATA_PORT", config.DefaultDataPort), "port for data transfer connections")
+	listen := flag.String("listen", envOrDefault("CELLO_LISTEN", server.DefaultListen), "address to listen on, e.g. :3001 or 127.0.0.1:3001")
 	publicBase := flag.String("public-base", envOrDefault("CELLO_PUBLIC_BASE", server.DefaultPublicBase), "base URL tunnels are published under, e.g. https://cello.example.com")
 	allowClientNames := flag.Bool("allow-client-names", envBool("CELLO_ALLOW_CLIENT_NAMES", false), "let clients choose their own channel name")
 	reservedNames := flag.String("reserved-names", envOrDefault("CELLO_RESERVED_NAMES", "www,api,admin,mail"), "comma-separated channel names that may never be registered")
 
 	flag.Parse()
 
-	cfg := server.Ports{
-		ChannelPort: fmt.Sprintf(":%s", *channelPort),
-		PublicPort:  fmt.Sprintf(":%s", *publicPort),
-		DataPort:    fmt.Sprintf(":%s", *dataPort),
-	}
+	cfg := server.Ports{Listen: *listen}
 
 	myServer, err := server.NewServer(cfg, server.Options{
 		PublicBase:       *publicBase,
@@ -56,9 +48,5 @@ func main() {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
 
-	go myServer.StartPublic()
-	go myServer.StartData()
-	myServer.StartChannel()
-
-	// select {}
+	myServer.Start()
 }

@@ -8,8 +8,16 @@ import (
 	"strings"
 
 	"github.com/henockt/cello/internal/client"
-	"github.com/henockt/cello/internal/config"
 )
+
+// envBool is envOrDefault for boolean flags. An unparseable value falls back to
+// def rather than failing, matching how the string form ignores nonsense.
+func envBool(env string, def bool) bool {
+	if v, err := strconv.ParseBool(os.Getenv(env)); err == nil {
+		return v
+	}
+	return def
+}
 
 // envOrDefault returns the value of the named environment variable, or def if
 // the variable is unset or empty.
@@ -20,11 +28,9 @@ func envOrDefault(env, def string) string {
 	return def
 }
 
-// cleanServerHost reduces a user-supplied -server value to a bare host. The
-// client dials the channel/data ports over raw TCP, so a scheme, path, or
-// embedded port (which belong to the public HTTPS URL, not this connection)
-// would break the dial. We strip them so "https://cello.example.com:443/foo"
-// becomes "cello.example.com".
+// cleanServerHost reduces a -server value to a bare host. a scheme, path or
+// port belongs to the public URL rather than the dial, so
+// "https://cello.example.com:443/foo" becomes "cello.example.com".
 func cleanServerHost(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.Index(s, "://"); i >= 0 {
@@ -49,8 +55,9 @@ func main() {
 	name := flag.String("name", envOrDefault("CELLO_CHANNEL_NAME", ""), "a name for your channel; empty lets the server assign one")
 	port := flag.Int("port", 3000, "port number for your local server")
 	serverHost := flag.String("server", envOrDefault("CELLO_SERVER_HOST", "localhost"), "cello server hostname or IP")
-	channelPort := flag.String("channel-port", envOrDefault("CELLO_CHANNEL_PORT", config.DefaultChannelPort), "cello server channel port")
-	dataPort := flag.String("data-port", envOrDefault("CELLO_DATA_PORT", config.DefaultDataPort), "cello server data port")
+	serverPort := flag.String("server-port", envOrDefault("CELLO_SERVER_PORT", "443"), "port the cello server is reachable on")
+	useTLS := flag.Bool("tls", envBool("CELLO_TLS", true), "connect to the server over TLS")
+	skipVerify := flag.Bool("tls-skip-verify", envBool("CELLO_TLS_SKIP_VERIFY", false), "accept any server certificate (unsafe. for self-signed self-hosting)")
 
 	flag.Parse()
 
@@ -59,9 +66,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "note: using server host %q (from %q)\n", host, *serverHost)
 	}
 
-	channelAddr := fmt.Sprintf("%s:%s", host, *channelPort)
-	dataAddr := fmt.Sprintf("%s:%s", host, *dataPort)
+	if *skipVerify {
+		fmt.Fprintln(os.Stderr, "warning: -tls-skip-verify disables certificate checks. the connection is not authenticated")
+	}
 
-	myClient := client.NewClient(*name, fmt.Sprintf(":%v", *port), channelAddr, dataAddr)
+	myClient := client.NewClient(*name, fmt.Sprintf(":%v", *port), client.NewServerAddr(host, *serverPort, *useTLS, *skipVerify))
 	myClient.ConnectServer()
 }

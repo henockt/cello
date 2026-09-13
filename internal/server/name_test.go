@@ -17,8 +17,7 @@ func TestNewChannelName(t *testing.T) {
 		if len(name) != nameLen {
 			t.Fatalf("newChannelName() = %q, want %d characters", name, nameLen)
 		}
-		// A generated name becomes a hostname label, so it must survive the
-		// same validation a client-supplied name does.
+		// a generated name must pass the same validation a chosen one does
 		if err := validateChannelName(name); err != nil {
 			t.Fatalf("newChannelName() = %q, which is not a valid name: %v", name, err)
 		}
@@ -35,8 +34,7 @@ func TestNewChannelName(t *testing.T) {
 }
 
 func TestNewChannelNameCannotCollideWithReservedWords(t *testing.T) {
-	// Generated names are a fixed length no reserved word shares, which is why
-	// the reserved list is only consulted for client-supplied names.
+	// generated names are a fixed length no reserved word shares
 	for _, word := range []string{"www", "api", "admin", "mail"} {
 		if len(word) == nameLen {
 			t.Errorf("reserved word %q is %d characters, so a generated name could collide with it", word, nameLen)

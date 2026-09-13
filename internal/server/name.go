@@ -13,15 +13,14 @@ const (
 	// length of client channel names
 	nameLen = 10
 
-	// nameAttempts bounds the retries when a generated name is already taken.
+	// retries when a generated name is already taken
 	nameAttempts = 5
 
-	// maxNameLen is the DNS label limit. a channel name becomes a hostname
-	// label, so it cannot exceed it.
+	// DNS label limit, a channel name becomes a hostname label
 	maxNameLen = 63
 )
 
-// newChannelName returns a random name safe to use as a DNS label.
+// newChannelName returns a random name usable as a DNS label.
 func newChannelName() (string, error) {
 	b := make([]byte, nameLen)
 	if _, err := rand.Read(b); err != nil {
@@ -34,7 +33,7 @@ func newChannelName() (string, error) {
 }
 
 // validateChannelName reports whether name is usable as a hostname label.
-// The returned error is shown to the user, so it says what is allowed rather than what failed.
+// the error is shown to the user, so it says what is allowed.
 func validateChannelName(name string) error {
 	if name == "" {
 		return fmt.Errorf("channel name must not be empty")

@@ -1,56 +1,12 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"io"
 	"net"
-	"strings"
 	"testing"
 )
-
-func TestExtractHost(t *testing.T) {
-	tests := []struct {
-		name   string
-		raw    string
-		want   string
-		wantOk bool
-	}{
-		{"simple host", "GET / HTTP/1.1\r\nHost: myapp.test.me\r\n\r\n", "myapp.test.me", true},
-		{"host with port", "GET / HTTP/1.1\r\nHost: foo.example.com:8080\r\n\r\n", "foo.example.com", true},
-		{"case-insensitive header name", "GET / HTTP/1.1\r\nhOsT: bar.example.com\r\n\r\n", "bar.example.com", true},
-		{"mixed-case host is lowercased", "GET / HTTP/1.1\r\nHost: MyApp.Example.COM\r\n\r\n", "myapp.example.com", true},
-		{"host header not first", "GET / HTTP/1.1\r\nUser-Agent: curl\r\nHost: baz.example.com\r\nAccept: */*\r\n\r\n", "baz.example.com", true},
-		{"ipv6 literal", "GET / HTTP/1.1\r\nHost: [::1]:3001\r\n\r\n", "::1", true},
-		{"missing host header", "GET / HTTP/1.1\r\nUser-Agent: curl\r\n\r\n", "", false},
-		{"eof before any header", "GET / HTTP/1.1\r\n", "", false},
-		{"empty host value", "GET / HTTP/1.1\r\nHost:\r\n\r\n", "", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			r := bufio.NewReader(strings.NewReader(tc.raw))
-			// Consume the request line — extractHost only parses headers.
-			if _, err := r.ReadString('\n'); err != nil {
-				t.Fatalf("failed to consume request line: %v", err)
-			}
-			got, ok := extractHost(r)
-			if got != tc.want || ok != tc.wantOk {
-				t.Errorf("extractHost() = %q, %v; want %q, %v", got, ok, tc.want, tc.wantOk)
-			}
-		})
-	}
-}
-
-func TestExtractHostStopsAtHeaderLimit(t *testing.T) {
-	// A peer that never sends a blank line must not hold the scan open.
-	raw := strings.Repeat("X-Filler: padding\r\n", maxHeaderLines+50)
-	r := bufio.NewReader(strings.NewReader(raw))
-	if got, ok := extractHost(r); ok {
-		t.Errorf("extractHost() = %q, true; want \"\", false", got)
-	}
-}
 
 func TestChannelFromHost(t *testing.T) {
 	const base = "cello.example.com"

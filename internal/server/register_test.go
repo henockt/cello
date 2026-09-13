@@ -27,8 +27,8 @@ func testServer(t *testing.T, allowClientNames bool) *Server {
 	return s
 }
 
-// channelConn is one client's end of a channel connection, kept open for the
-// lifetime of the test so its registration stays live.
+// channelConn is a client's end of a channel conn, kept open so the
+// registration stays live.
 type channelConn struct {
 	conn   net.Conn
 	reader *bufio.Reader
@@ -38,7 +38,7 @@ func dialChannel(t *testing.T, s *Server) *channelConn {
 	t.Helper()
 	cli, srv := net.Pipe()
 	t.Cleanup(func() { cli.Close() })
-	go s.handleClient(srv)
+	go s.handleClient(srv, bufio.NewReader(srv), preamble{host: "cello.example.com"})
 	if err := cli.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("SetDeadline() failed: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestRegisterWithoutColonAssignsName(t *testing.T) {
 }
 
 func TestRegisterIgnoresRequestedNameWhenNotAllowed(t *testing.T) {
-	// The tunnel still comes up; the client is simply given another name.
+	// the tunnel still comes up, with a different name
 	s := testServer(t, false)
 
 	reply := register(t, s, "myapp")
@@ -112,8 +112,7 @@ func TestRegisterHonorsRequestedName(t *testing.T) {
 }
 
 func TestRegisterLowercasesRequestedName(t *testing.T) {
-	// Hostnames are case-insensitive, so the name must be folded on the way in
-	// or "MyApp" and "myapp" would be two channels behind one URL.
+	// hostnames are case-insensitive, so "MyApp" and "myapp" are one channel
 	s := testServer(t, true)
 
 	want := config.ChannelSuccess + ":https://myapp.cello.example.com"

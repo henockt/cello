@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -25,23 +26,23 @@ import (
 // then reachable at http://myapp.localhost:3001
 const DefaultPublicBase = "http://localhost:3001"
 
-// Ports holds the listen addresses for each server listener.
-// Each value is a full listen address, e.g. ":9000" or "0.0.0.0:9000".
+// behind a proxy this should be loopback only, e.g. "127.0.0.1:3001"
+const DefaultListen = ":3001"
+
+// Ports holds the listen address. visitors and clients share it.
 type Ports struct {
-	ChannelPort string
-	DataPort    string
-	PublicPort  string
+	Listen string
 }
 
-// Options holds server policy, as distinct from the listen addresses.
+// Options holds server policy.
 type Options struct {
 	// PublicBase is the base URL tunnels are published under
 	PublicBase string
 
 	AllowClientNames bool
 
-	// ReservedNames can never be registered. Only consulted when
-	// AllowClientNames is set, since generated names cannot collide with them
+	// ReservedNames can never be registered. only checked for client-chosen
+	// names, generated ones are too long to collide
 	ReservedNames []string
 }
 
@@ -96,31 +97,72 @@ func (s *Server) tunnelURL(name string) string {
 	return fmt.Sprintf("%s://%s.%s", s.publicScheme, name, s.publicHostPort)
 }
 
-// Setups and starts listener for a client connection
-func (s *Server) StartChannel() {
-	listener, err := net.Listen("tcp", s.cfg.ChannelPort)
+// Start accepts visitors and tunnel clients on one port.
+func (s *Server) Start() {
+	listener, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
-		log.Fatal("Error starting client listener on ", s.cfg.ChannelPort)
+		log.Fatalf("Error starting listener on %s: %v", s.cfg.Listen, err)
 	}
 	defer listener.Close()
-	log.Println("Client listener active on", s.cfg.ChannelPort)
+	log.Printf("Listening on %s, publishing tunnels under *.%s", s.cfg.Listen, s.baseHost)
 
 	for {
 		conn, err := listener.Accept()
-
 		if err != nil {
 			log.Println("Failed to accept connection: ", err)
 			continue
 		}
-		log.Println("Client connected")
-		go s.handleClient(conn)
+		go s.handleConn(conn)
 	}
 }
 
-func (s *Server) handleClient(conn net.Conn) {
+// handleConn routes a new connection to the control protocol or the relay.
+func (s *Server) handleConn(conn net.Conn) {
+	// tee the preamble so a tunnel request can be replayed to the client
+	buf := new(bytes.Buffer)
+	reader := bufio.NewReader(io.TeeReader(conn, buf))
+
+	req, ok := readPreamble(reader)
+	if !ok {
+		sendHTTPResp(conn, 400, "Malformed request")
+		conn.Close()
+		return
+	}
+
+	if req.isControl(s.baseHost) {
+		s.handleControl(conn, reader, req)
+		return
+	}
+	s.handleTunnel(conn, buf, req)
+}
+
+// handleControl upgrades the connection and dispatches by endpoint.
+func (s *Server) handleControl(conn net.Conn, reader *bufio.Reader, req preamble) {
+	var handler func(net.Conn, *bufio.Reader, preamble)
+	switch req.path {
+	case config.ChannelPath:
+		handler = s.handleClient
+	case config.DataPath:
+		handler = s.handleData
+	default:
+		sendHTTPResp(conn, 404, "Unknown control endpoint")
+		conn.Close()
+		return
+	}
+
+	if err := acceptUpgrade(conn); err != nil {
+		log.Printf("Failed to complete upgrade for %s: %v", req.path, err)
+		conn.Close()
+		return
+	}
+	// stop teeing, this conn outlives the request that opened it
+	handler(conn, detach(reader, conn), req)
+}
+
+func (s *Server) handleClient(conn net.Conn, reader *bufio.Reader, req preamble) {
 	defer conn.Close()
 	enableKeepAlive(conn)
-	reader := bufio.NewReader(conn)
+	log.Printf("Client connected from %s", clientIP(conn, req))
 
 	for {
 		data, err := reader.ReadString('\n')
@@ -144,9 +186,8 @@ func (s *Server) handleClient(conn net.Conn) {
 			continue
 		}
 
-		// "SUB", "SUB:" and "SUB:<name>" are all valid. the first two ask the
-		// server to assign a name. Names are lowercased on the way in because
-		// hostnames are case-insensitive
+		// "SUB", "SUB:" and "SUB:<name>" are all valid, the first two ask for
+		// an assigned name. lowercased since hostnames are case-insensitive
 		requested, _ := strings.CutPrefix(line, config.ChannelRequest+":")
 		if requested == line {
 			requested = ""
@@ -155,10 +196,8 @@ func (s *Server) handleClient(conn net.Conn) {
 	}
 }
 
-// register resolves a channel name for conn and replies ACK or NAK. A client
-// may request a name, but whether that request is honored is server policy
-// when it is not, the client is given an assigned name rather than an error,
-// so the tunnel still comes up.
+// register picks a channel name for conn and replies ACK or NAK. a requested
+// name is honored only if policy allows it, otherwise one is assigned.
 func (s *Server) register(conn net.Conn, requested string) {
 	if existing, err := s.cm.getKey(conn); err == nil {
 		s.reject(conn, config.NakInvalid, fmt.Sprintf("connection is already registered as %q", existing))
@@ -182,8 +221,7 @@ func (s *Server) register(conn net.Conn, requested string) {
 		return
 	}
 
-	// Assign a name. A collision is improbable rather than impossible, so the
-	// add is what claims the name and a clash just means trying again.
+	// the add claims the name, so a collision just means trying again
 	for range nameAttempts {
 		name, err := newChannelName()
 		if err != nil {
@@ -200,9 +238,8 @@ func (s *Server) register(conn net.Conn, requested string) {
 	s.reject(conn, config.NakInternal, "server could not assign a free name")
 }
 
-// accept confirms a registration, handing the client the URL its tunnel is
-// published at. client cannot construct this itself, since the public
-// scheme and port are known only to the server.
+// accept confirms a registration with the tunnel URL. only the server knows
+// the public scheme and port, so only it can build this.
 func (s *Server) accept(conn net.Conn, name, requested string) {
 	url := s.tunnelURL(name)
 	if _, err := fmt.Fprintf(conn, "%s:%s\n", config.ChannelSuccess, url); err != nil {
@@ -216,8 +253,7 @@ func (s *Server) accept(conn net.Conn, name, requested string) {
 	log.Printf("Client registered as %s (%s)", name, url)
 }
 
-// reject refuses a registration with a code and a message
-// meant for the user. Newlines are stripped because the frame is one line.
+// reject refuses a registration. newlines are stripped, a frame is one line.
 func (s *Server) reject(conn net.Conn, code, msg string) {
 	msg = strings.ReplaceAll(msg, "\n", " ")
 	log.Printf("Registration rejected (%s): %s", code, msg)
@@ -229,45 +265,20 @@ func (s *Server) reject(conn net.Conn, code, msg string) {
 // enableKeepAlive turns on TCP keepalive so dead connections are detected and
 // cleaned up instead of lingering. No-op for non-TCP connections.
 func enableKeepAlive(conn net.Conn) {
+	// unwrap TLS first, a *tls.Conn is not a *net.TCPConn
+	if tc, ok := conn.(*tls.Conn); ok {
+		conn = tc.NetConn()
+	}
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
 	}
 }
 
-// public connection listener
-// sends PUB:<RequestId>
-func (s *Server) StartPublic() {
-	listener, err := net.Listen("tcp", s.cfg.PublicPort)
-	if err != nil {
-		log.Fatal("Error starting public listener on ", s.cfg.PublicPort)
-	}
-	defer listener.Close()
-	log.Println("Public listener active on", s.cfg.PublicPort)
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Println("Failed to accept public request: ", err)
-			continue
-		}
-		log.Println("Received new public request")
-
-		go s.handlePublic(conn)
-	}
-}
-
-func (s *Server) handlePublic(conn net.Conn) {
-	buf := new(bytes.Buffer)
-	bufReader := bufio.NewReader(io.TeeReader(conn, buf))
-
-	host, ok := extractHost(bufReader)
-	if !ok {
-		sendHTTPResp(conn, 400, "Missing or malformed Host header")
-		conn.Close()
-		return
-	}
-	key, ok := channelFromHost(host, s.baseHost)
+// handleTunnel relays one visitor request to the tunnel its Host names. buf
+// holds what was already read, replayed so the client gets the request intact.
+func (s *Server) handleTunnel(conn net.Conn, buf *bytes.Buffer, req preamble) {
+	key, ok := channelFromHost(req.host, s.baseHost)
 	if !ok {
 		sendHTTPResp(conn, 404, fmt.Sprintf("No tunnel specified: this server publishes tunnels under *.%s", s.baseHost))
 		conn.Close()
@@ -320,48 +331,8 @@ func newRequestID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// maxHeaderLines bounds the header scan so a peer that never sends a blank
-// line cannot hold the goroutine open indefinitely.
-const maxHeaderLines = 100
-
-// extractHost scans request headers for the Host header, returning it
-// lowercased and without any port. ok is false when the request carries no
-// usable Host
-func extractHost(reader *bufio.Reader) (string, bool) {
-	for range maxHeaderLines {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return "", false
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			return "", false // end of headers, no Host
-		}
-
-		// Lowercase up front: the header name is case-insensitive, and so is
-		// the host, which is the map key everything downstream routes on.
-		rest, ok := strings.CutPrefix(strings.ToLower(line), "host:")
-		if !ok {
-			continue
-		}
-		host := strings.TrimSpace(rest)
-
-		// Strip the port, leaving IPv6 literals ("[::1]", "[::1]:3001") intact.
-		if i := strings.LastIndexByte(host, ':'); i >= 0 && !strings.HasSuffix(host, "]") {
-			host = host[:i]
-		}
-		host = strings.Trim(host, "[]")
-		if host == "" {
-			return "", false
-		}
-		return host, true
-	}
-	return "", false
-}
-
-// channelFromHost returns the channel a host routes to: the leftmost label of
-// a subdomain of baseHost. ok is false when the host names the server itself
-// rather than a tunnel, so that case can be answered rather than routed.
+// channelFromHost returns the leftmost label of a subdomain of baseHost.
+// ok is false when the host names the server itself rather than a tunnel.
 func channelFromHost(host, baseHost string) (string, bool) {
 	suffix := "." + baseHost
 	if !strings.HasSuffix(host, suffix) {
@@ -406,11 +377,8 @@ func sendHTTPResp(conn net.Conn, code int, msg string) {
 	}
 }
 
-// idleTimeout bounds how long a relayed connection may sit with neither side
-// sending before the server reclaims it. A transparent TCP tunnel cannot know
-// where an HTTP response ends, so on an HTTP/1.1 keepalive request neither the
-// local service nor the browser closes and the relay would otherwise pin two
-// connections and two goroutines indefinitely.
+// idleTimeout reclaims a relay that has gone quiet. a TCP tunnel cannot tell
+// where an HTTP response ends, so on keepalive neither side ever closes.
 const idleTimeout = 2 * time.Minute
 
 // deadlineSetter is the subset of net.Conn that copyIdle needs to bound a read.
@@ -418,12 +386,9 @@ type deadlineSetter interface {
 	SetReadDeadline(time.Time) error
 }
 
-// copyIdle copies src into dst, refreshing a read deadline on dl before every
-// read so a silent peer is reclaimed after idle rather than blocking forever.
-// src and dl are separate because the response path reads through a
-// bufio.Reader while the deadline belongs to the connection underneath it.
-// io.Copy cannot be used here: it would never refresh the deadline, and
-// bufio.Reader's WriteTo would bypass the loop entirely.
+// copyIdle copies src to dst, refreshing a read deadline before every read.
+// src and dl differ when reading through a bufio.Reader: the deadline belongs
+// to the conn underneath. io.Copy would never refresh it.
 func copyIdle(dst io.Writer, src io.Reader, dl deadlineSetter, idle time.Duration) (int64, error) {
 	buf := make([]byte, 32*1024)
 	var total int64
@@ -450,10 +415,8 @@ func copyIdle(dst io.Writer, src io.Reader, dl deadlineSetter, idle time.Duratio
 	}
 }
 
-// logRelayErr reports a relay copy failure, staying quiet about the two errors
-// that are how a relay normally ends: net.ErrClosed, which is how the sibling
-// goroutine's deliberate Close unblocks a pending Read, and a deadline expiry,
-// which is the idle reclaim working as intended.
+// logRelayErr reports a copy failure, ignoring the two errors that are how a
+// relay normally ends: the sibling goroutine's Close, and the idle deadline.
 func logRelayErr(dir, reqId string, err error) {
 	switch {
 	case errors.Is(err, net.ErrClosed):
@@ -464,29 +427,10 @@ func logRelayErr(dir, reqId string, err error) {
 	}
 }
 
-func (s *Server) StartData() {
-	listener, err := net.Listen("tcp", s.cfg.DataPort)
-	if err != nil {
-		log.Fatal("Error starting data listener on ", s.cfg.DataPort)
-	}
-	defer listener.Close()
-	log.Println("Data listener active on", s.cfg.DataPort)
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Println("Error accepting data request: ", err)
-			continue
-		}
-		go s.handleData(conn)
-	}
-}
-
-func (s *Server) handleData(conn net.Conn) {
+func (s *Server) handleData(conn net.Conn, clientReader *bufio.Reader, _ preamble) {
 	defer conn.Close()
 	enableKeepAlive(conn)
 
-	clientReader := bufio.NewReader(conn)
 	msg, err := clientReader.ReadString('\n')
 	if err != nil {
 		log.Printf("Error reading request id: %v", err)
@@ -534,12 +478,8 @@ func (s *Server) handleData(conn net.Conn) {
 	var wg sync.WaitGroup
 
 	// Response path (client agent -> HTTP client).
-	// Copies from clientReader, not conn: the bufio.Reader that consumed the
-	// request-ID line above may also hold payload bytes that arrived in the
-	// same read, and reading the bare conn would discard them.
-	// When done, close pubConn entirely so the request goroutine below which
-	// is blocked on pubConn.Read() waiting for the HTTP client to send more
-	// data — is unblocked and can exit cleanly.
+	// Reads clientReader, not conn: it may hold payload that arrived with the
+	// request-ID line. The Close at the end unblocks the goroutine below.
 	wg.Go(func() {
 		if _, err := copyIdle(pubConn, clientReader, conn, idleTimeout); err != nil {
 			logRelayErr("dataConn->pubConn", reqId, err)
@@ -553,9 +493,8 @@ func (s *Server) handleData(conn net.Conn) {
 	})
 
 	// Request path (HTTP client -> client agent).
-	// HTTP clients never close their write side. they wait for the response.
-	// This goroutine is unblocked by pubConn.Close() above once the response
-	// is fully delivered, or by its own idle deadline.
+	// HTTP clients never close their write side, they wait for the response.
+	// pubConn.Close() above unblocks this, or the idle deadline does.
 	wg.Go(func() {
 		if _, err := copyIdle(conn, pubConn, pubConn, idleTimeout); err != nil {
 			logRelayErr("pubConn->dataConn", reqId, err)

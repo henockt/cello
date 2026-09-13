@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -16,36 +17,119 @@ import (
 
 const (
 	connectTimeout = 10 * time.Second
+
+	// cap the upgrade response scan
+	maxHeaderLines = 100
 )
 
 type Client struct {
-	ClientId    string // channel name, empty until the server assigns one
-	TunnelURL   string // public URL of this tunnel, set on registration
-	LocalPort   string
-	channelAddr string // e.g. "host:9000"
-	dataAddr    string // e.g. "host:9001"
+	ClientId  string // channel name, empty until the server assigns one
+	TunnelURL string // public URL of this tunnel, set on registration
+	LocalPort string
+	server    *serverAddr
 }
 
-func NewClient(name, port, channelAddr, dataAddr string) *Client {
+// serverAddr is how the client reaches the server. one host and port carry
+// both control endpoints.
+type serverAddr struct {
+	host    string // e.g. "cello.example.com", also the TLS server name
+	addr    string // e.g. "cello.example.com:443"
+	useTLS  bool
+	tlsConf *tls.Config
+}
+
+// NewServerAddr describes how to reach a cello server.
+func NewServerAddr(host, port string, useTLS, skipVerify bool) *serverAddr {
+	s := &serverAddr{
+		host:   host,
+		addr:   net.JoinHostPort(host, port),
+		useTLS: useTLS,
+	}
+	if useTLS {
+		s.tlsConf = &tls.Config{
+			ServerName: host,
+			// HTTP/2 has no Upgrade, and a proxy offers h2 by default
+			NextProtos: []string{"http/1.1"},
+			// each request opens a new data conn, so resume rather than
+			// pay a full handshake every time
+			ClientSessionCache: tls.NewLRUClientSessionCache(64),
+			InsecureSkipVerify: skipVerify,
+		}
+	}
+	return s
+}
+
+// dial connects and upgrades, returning a reader set just past the handshake.
+func (s *serverAddr) dial(path string) (net.Conn, *bufio.Reader, error) {
+	dialer := &net.Dialer{Timeout: connectTimeout}
+
+	var conn net.Conn
+	var err error
+	if s.useTLS {
+		conn, err = tls.DialWithDialer(dialer, "tcp", s.addr, s.tlsConf)
+	} else {
+		conn, err = dialer.Dial("tcp", s.addr)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	reader, err := upgrade(conn, s.host, path)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	return conn, reader, nil
+}
+
+// upgrade performs the handshake and returns the reader that consumed the
+// response. keep using it: it may hold bytes the server sent after the 101.
+func upgrade(conn net.Conn, host, path string) (*bufio.Reader, error) {
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: %s\r\nConnection: Upgrade\r\n\r\n",
+		path, host, config.UpgradeToken)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		return nil, fmt.Errorf("sending upgrade request: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading upgrade response: %w", err)
+	}
+	if !strings.Contains(status, "101") {
+		return nil, fmt.Errorf("server refused the upgrade: %s", strings.TrimSpace(status))
+	}
+
+	// drain the response headers
+	for range maxHeaderLines {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("reading upgrade response headers: %w", err)
+		}
+		if strings.TrimSpace(line) == "" {
+			return reader, nil
+		}
+	}
+	return nil, fmt.Errorf("upgrade response headers too long")
+}
+
+func NewClient(name, port string, server *serverAddr) *Client {
 	return &Client{
-		// Fold here so a requested "MyApp" matches the "myapp" the server
-		// registers, and is not mistaken for the server overriding the name.
-		ClientId:    strings.ToLower(strings.TrimSpace(name)),
-		LocalPort:   port,
-		channelAddr: channelAddr,
-		dataAddr:    dataAddr,
+		// fold so "MyApp" matches the "myapp" the server registers
+		ClientId:  strings.ToLower(strings.TrimSpace(name)),
+		LocalPort: port,
+		server:    server,
 	}
 }
 
 // connect to server
 func (c *Client) ConnectServer() {
-	dialer := net.Dialer{Timeout: connectTimeout}
-	conn, err := dialer.Dial("tcp", c.channelAddr)
+	conn, reader, err := c.server.dial(config.ChannelPath)
 	if err != nil {
-		log.Fatalf("Failed to connect to server at %s:\n%v", c.channelAddr, err)
+		log.Fatalf("Failed to connect to server at %s:\n%v", c.server.addr, err)
 	}
 	defer conn.Close()
-	log.Printf("Connected to server at %s", c.channelAddr)
+	log.Printf("Connected to server at %s", c.server.addr)
 
 	// Ask for a name, or send none and let the server assign one.
 	request := fmt.Sprintf("%s:%s\n", config.ChannelRequest, c.ClientId)
@@ -53,7 +137,6 @@ func (c *Client) ConnectServer() {
 		log.Fatalf("Failed to send registration request: %v", err)
 	}
 
-	reader := bufio.NewReader(conn)
 	for {
 		data, err := reader.ReadString('\n')
 		if err != nil {
@@ -67,8 +150,7 @@ func (c *Client) ConnectServer() {
 		}
 		verb := line[:3]
 
-		// Everything after the first ':' is payload. Splitting only on the
-		// first one matters: a tunnel URL contains colons of its own.
+		// everything after the first ':' is payload, a URL has colons too
 		payload := ""
 		if len(line) > 3 && line[3] == ':' {
 			payload = line[4:]
@@ -85,14 +167,14 @@ func (c *Client) ConnectServer() {
 			log.Printf("Server ended the session: %s", payload)
 			return
 		case config.ChannelPublish:
-			go handlePublish(payload, c.LocalPort, c.dataAddr)
+			go handlePublish(payload, c.LocalPort, c.server)
 		default:
 			log.Printf("Unknown message type: %s", verb)
 		}
 	}
 }
 
-// onRegistered records the tunnel URL the server assigned and reports it.
+// onRegistered records the tunnel URL and reports it.
 func (c *Client) onRegistered(rawURL string) {
 	if rawURL == "" {
 		log.Println("Server confirmed registration but sent no tunnel URL")
@@ -110,8 +192,7 @@ func (c *Client) onRegistered(rawURL string) {
 	log.Printf("Tunnel live: %s -> %s", rawURL, localDisplay(c.LocalPort))
 }
 
-// tunnelName is the channel name embedded in a tunnel URL: the leftmost label
-// of its host. Returns "" if the URL cannot be parsed.
+// tunnelName is the leftmost label of a tunnel URL's host.
 func tunnelName(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -121,8 +202,7 @@ func tunnelName(rawURL string) string {
 	return host
 }
 
-// localDisplay renders the local address for logs, filling in the host when
-// only a port was given.
+// localDisplay fills in the host when only a port was given.
 func localDisplay(localPort string) string {
 	if strings.HasPrefix(localPort, ":") {
 		return "localhost" + localPort
@@ -130,9 +210,8 @@ func localDisplay(localPort string) string {
 	return localPort
 }
 
-// handlePublish opens a data connection for one request id, then proxies it
-// to the local server.
-func handlePublish(reqId string, localPort string, dataAddr string) {
+// handlePublish opens a data connection for one request and proxies it local.
+func handlePublish(reqId string, localPort string, server *serverAddr) {
 	dialer := net.Dialer{Timeout: connectTimeout}
 
 	if len(reqId) == 0 {
@@ -159,15 +238,15 @@ func handlePublish(reqId string, localPort string, dataAddr string) {
 	if err != nil {
 		log.Printf("Failed to connect to local server at %s: %v", localPort, err)
 		// Notify server that local connection failed so it can respond with error
-		notifyConnectionFailure(reqId, dataAddr)
+		notifyConnectionFailure(reqId, server)
 		return
 	}
 	defer localConn.Close()
 
-	// Now connect to data server after confirming local server exists
-	servConn, err := dialer.Dial("tcp", dataAddr)
+	// Now connect to the data endpoint after confirming local server exists
+	servConn, servReader, err := server.dial(config.DataPath)
 	if err != nil {
-		log.Printf("Failed to connect to data listener at %s: %v", dataAddr, err)
+		log.Printf("Failed to open a data connection to %s: %v", server.addr, err)
 		return
 	}
 	defer servConn.Close()
@@ -178,7 +257,6 @@ func handlePublish(reqId string, localPort string, dataAddr string) {
 		return
 	}
 
-	servReader := bufio.NewReader(servConn)
 	ack, err := servReader.ReadString('\n')
 	if err != nil {
 		log.Printf("Failed to read ACK from server: %v", err)
@@ -221,9 +299,8 @@ func handlePublish(reqId string, localPort string, dataAddr string) {
 }
 
 // notifyConnectionFailure connects to data server and signals that local connection failed
-func notifyConnectionFailure(reqId string, dataAddr string) {
-	dialer := net.Dialer{Timeout: connectTimeout}
-	conn, err := dialer.Dial("tcp", dataAddr)
+func notifyConnectionFailure(reqId string, server *serverAddr) {
+	conn, _, err := server.dial(config.DataPath)
 	if err != nil {
 		log.Printf("Failed to notify server of connection failure for request %s: %v", reqId, err)
 		return
