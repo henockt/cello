@@ -120,7 +120,7 @@ func (s *Server) Start() {
 func (s *Server) handleConn(conn net.Conn) {
 	// tee the preamble so a tunnel request can be replayed to the client
 	buf := new(bytes.Buffer)
-	reader := bufio.NewReader(io.TeeReader(conn, buf))
+	reader := config.NewFrameReader(io.TeeReader(conn, buf))
 
 	req, ok := readPreamble(reader)
 	if !ok {
@@ -165,7 +165,7 @@ func (s *Server) handleClient(conn net.Conn, reader *bufio.Reader, req preamble)
 	log.Printf("Client connected from %s", clientIP(conn, req))
 
 	for {
-		data, err := reader.ReadString('\n')
+		data, err := config.ReadFrame(reader)
 		if err != nil {
 			key, errk := s.cm.getKey(conn)
 			if errk != nil {
@@ -431,7 +431,7 @@ func (s *Server) handleData(conn net.Conn, clientReader *bufio.Reader, _ preambl
 	defer conn.Close()
 	enableKeepAlive(conn)
 
-	msg, err := clientReader.ReadString('\n')
+	msg, err := config.ReadFrame(clientReader)
 	if err != nil {
 		log.Printf("Error reading request id: %v", err)
 		return

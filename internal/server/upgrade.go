@@ -32,7 +32,7 @@ func (p preamble) isControl(baseHost string) bool {
 func readPreamble(reader *bufio.Reader) (preamble, bool) {
 	var p preamble
 
-	line, err := reader.ReadString('\n')
+	line, err := config.ReadFrame(reader)
 	if err != nil {
 		return p, false
 	}
@@ -44,7 +44,7 @@ func readPreamble(reader *bufio.Reader) (preamble, bool) {
 	p.path = parts[1]
 
 	for range maxHeaderLines {
-		line, err := reader.ReadString('\n')
+		line, err := config.ReadFrame(reader)
 		if err != nil {
 			return p, false
 		}
@@ -105,7 +105,7 @@ func detach(r *bufio.Reader, conn net.Conn) *bufio.Reader {
 			leftover = nil
 		}
 	}
-	return bufio.NewReader(&BufferedConn{Conn: conn, buffer: bytes.NewReader(leftover)})
+	return config.NewFrameReader(&BufferedConn{Conn: conn, buffer: bytes.NewReader(leftover)})
 }
 
 // clientIP attributes a connection. X-Forwarded-For is client-settable, so

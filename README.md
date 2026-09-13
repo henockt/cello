@@ -104,16 +104,45 @@ forwards to cello on loopback.
 
 The proxy is the only thing the firewall needs to expose.
 
+```bash
+xcaddy build --with github.com/caddy-dns/<your-provider> \
+             --with github.com/mholt/caddy-ratelimit
+```
+
 ```
 *.cello.example.com, cello.example.com {
     tls { dns <your-provider> {env.API_TOKEN} }
+
+    rate_limit {
+        zone registrations {
+            match {
+                host cello.example.com
+                path /_cello/channel
+            }
+            key         {remote_host}
+            window      1m
+            events      5
+            ipv6_prefix 64
+        }
+    }
+
     reverse_proxy 127.0.0.1:3001 {
-        stream_timeout 0
+        stream_timeout 2h
     }
 }
 ```
 
 The site block must cover the apex as well as the wildcard.
+
+`rate_limit` caps how fast one address can open tunnels. Registration is an
+ordinary HTTP request before the upgrade, so the proxy sees the real client
+address and can limit it. `ipv6_prefix 64` keys on the prefix, since a single
+host usually gets a whole /64.
+
+`stream_timeout` is the lifetime of a tunnel. It bounds how long any one session
+can live, and recycles names. Set it to `0` only if you want tunnels to live
+until a peer closes. note that it also cuts off a single request that runs longer
+than the timeout.
 
 ```bash
 # on the server, a port above 1024, bound to loopback

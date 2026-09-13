@@ -1,5 +1,11 @@
 package config
 
+import (
+	"bufio"
+	"errors"
+	"io"
+)
+
 /*
 This package includes common communication
 configurations between client and server
@@ -41,3 +47,26 @@ const (
 	// to claim a public request before responding with 504.
 	RequestTimeout = 30
 )
+
+// MaxFrameLen bounds one protocol line. a peer that never sends a newline would
+// otherwise grow the read buffer until the process dies.
+const MaxFrameLen = 4096
+
+// ErrFrameTooLong is returned for a line that never ends.
+var ErrFrameTooLong = errors.New("frame too long")
+
+// NewFrameReader wraps r with a buffer sized so that ReadFrame can cap a line.
+func NewFrameReader(r io.Reader) *bufio.Reader {
+	return bufio.NewReaderSize(r, MaxFrameLen)
+}
+
+// ReadFrame reads one newline-terminated line. ReadSlice fails once the buffer
+// fills, where ReadString would keep growing it.
+func ReadFrame(r *bufio.Reader) (string, error) {
+	line, err := r.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		return "", ErrFrameTooLong
+	}
+	// the slice is only valid until the next read, so copy it out
+	return string(line), err
+}

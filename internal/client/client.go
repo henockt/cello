@@ -91,8 +91,8 @@ func upgrade(conn net.Conn, host, path string) (*bufio.Reader, error) {
 		return nil, fmt.Errorf("sending upgrade request: %w", err)
 	}
 
-	reader := bufio.NewReader(conn)
-	status, err := reader.ReadString('\n')
+	reader := config.NewFrameReader(conn)
+	status, err := config.ReadFrame(reader)
 	if err != nil {
 		return nil, fmt.Errorf("reading upgrade response: %w", err)
 	}
@@ -102,7 +102,7 @@ func upgrade(conn net.Conn, host, path string) (*bufio.Reader, error) {
 
 	// drain the response headers
 	for range maxHeaderLines {
-		line, err := reader.ReadString('\n')
+		line, err := config.ReadFrame(reader)
 		if err != nil {
 			return nil, fmt.Errorf("reading upgrade response headers: %w", err)
 		}
@@ -138,7 +138,7 @@ func (c *Client) ConnectServer() {
 	}
 
 	for {
-		data, err := reader.ReadString('\n')
+		data, err := config.ReadFrame(reader)
 		if err != nil {
 			log.Printf("Error reading server response: %v", err)
 			return
@@ -257,7 +257,7 @@ func handlePublish(reqId string, localPort string, server *serverAddr) {
 		return
 	}
 
-	ack, err := servReader.ReadString('\n')
+	ack, err := config.ReadFrame(servReader)
 	if err != nil {
 		log.Printf("Failed to read ACK from server: %v", err)
 		return
