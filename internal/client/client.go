@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,8 @@ const (
 )
 
 type Client struct {
-	ClientId    string
+	ClientId    string // channel name, empty until the server assigns one
+	TunnelURL   string // public URL of this tunnel, set on registration
 	LocalPort   string
 	channelAddr string // e.g. "host:9000"
 	dataAddr    string // e.g. "host:9001"
@@ -26,7 +28,9 @@ type Client struct {
 
 func NewClient(name, port, channelAddr, dataAddr string) *Client {
 	return &Client{
-		ClientId:    name,
+		// Fold here so a requested "MyApp" matches the "myapp" the server
+		// registers, and is not mistaken for the server overriding the name.
+		ClientId:    strings.ToLower(strings.TrimSpace(name)),
 		LocalPort:   port,
 		channelAddr: channelAddr,
 		dataAddr:    dataAddr,
@@ -43,7 +47,7 @@ func (c *Client) ConnectServer() {
 	defer conn.Close()
 	log.Printf("Connected to server at %s", c.channelAddr)
 
-	// send SUB:<ClientId> and wait for response
+	// Ask for a name, or send none and let the server assign one.
 	request := fmt.Sprintf("%s:%s\n", config.ChannelRequest, c.ClientId)
 	if _, err := conn.Write([]byte(request)); err != nil {
 		log.Fatalf("Failed to send registration request: %v", err)
@@ -57,35 +61,79 @@ func (c *Client) ConnectServer() {
 			return
 		}
 
-		if len(data) < 3 {
+		line := strings.TrimRight(data, "\r\n")
+		if len(line) < 3 {
 			continue
 		}
+		verb := line[:3]
 
-		msg := data[:3]
+		// Everything after the first ':' is payload. Splitting only on the
+		// first one matters: a tunnel URL contains colons of its own.
+		payload := ""
+		if len(line) > 3 && line[3] == ':' {
+			payload = line[4:]
+		}
 
-		switch msg {
+		switch verb {
 		case config.ChannelSuccess:
-			log.Printf("Successfully registered client '%s'", c.ClientId)
-		case config.ChannelTaken:
-			log.Printf("Client name '%s' is not available, exiting", c.ClientId)
+			c.onRegistered(payload)
+		case config.ChannelReject:
+			code, msg, _ := strings.Cut(payload, ":")
+			log.Printf("Server refused registration (%s): %s", code, msg)
+			return
+		case config.ChannelEnd:
+			log.Printf("Server ended the session: %s", payload)
 			return
 		case config.ChannelPublish:
-			log.Printf("Received publish request: %s", strings.TrimSpace(data))
-			go handlePublish(data, c.LocalPort, c.dataAddr)
+			go handlePublish(payload, c.LocalPort, c.dataAddr)
 		default:
-			log.Printf("Unknown message type: %s", msg)
+			log.Printf("Unknown message type: %s", verb)
 		}
 	}
 }
 
-// connects to server and sends request id, PUB:<RequestId>
-// receives payload then proxies to local server
-func handlePublish(pub string, localPort string, dataAddr string) {
-	dialer := net.Dialer{Timeout: connectTimeout}
+// onRegistered records the tunnel URL the server assigned and reports it.
+func (c *Client) onRegistered(rawURL string) {
+	if rawURL == "" {
+		log.Println("Server confirmed registration but sent no tunnel URL")
+		return
+	}
+	c.TunnelURL = rawURL
 
-	// Parse request ID from publish message: "PUB:requestId\n"
-	reqId := strings.TrimPrefix(pub, config.ChannelPublish+":")
-	reqId = strings.TrimSuffix(reqId, "\n")
+	name := tunnelName(rawURL)
+	if c.ClientId != "" && name != "" && name != c.ClientId {
+		log.Printf("This server assigns channel names. %q was not used", c.ClientId)
+	}
+	if name != "" {
+		c.ClientId = name
+	}
+	log.Printf("Tunnel live: %s -> %s", rawURL, localDisplay(c.LocalPort))
+}
+
+// tunnelName is the channel name embedded in a tunnel URL: the leftmost label
+// of its host. Returns "" if the URL cannot be parsed.
+func tunnelName(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	host, _, _ := strings.Cut(u.Hostname(), ".")
+	return host
+}
+
+// localDisplay renders the local address for logs, filling in the host when
+// only a port was given.
+func localDisplay(localPort string) string {
+	if strings.HasPrefix(localPort, ":") {
+		return "localhost" + localPort
+	}
+	return localPort
+}
+
+// handlePublish opens a data connection for one request id, then proxies it
+// to the local server.
+func handlePublish(reqId string, localPort string, dataAddr string) {
+	dialer := net.Dialer{Timeout: connectTimeout}
 
 	if len(reqId) == 0 {
 		log.Println("Invalid publish message: empty request id")

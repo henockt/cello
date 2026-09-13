@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -20,6 +21,10 @@ import (
 	"github.com/henockt/cello/internal/config"
 )
 
+// DefaultPublicBase suits local development. a client registered as "myapp" is
+// then reachable at http://myapp.localhost:3001
+const DefaultPublicBase = "http://localhost:3001"
+
 // Ports holds the listen addresses for each server listener.
 // Each value is a full listen address, e.g. ":9000" or "0.0.0.0:9000".
 type Ports struct {
@@ -28,20 +33,67 @@ type Ports struct {
 	PublicPort  string
 }
 
-type Server struct {
-	cfg            Ports
-	cm             ChannelMap // registered client channels, by channel name
-	rm             ChannelMap // public request connections, by request ID
-	DefaultChannel string     // fallback channel name for localhost/dev environments
+// Options holds server policy, as distinct from the listen addresses.
+type Options struct {
+	// PublicBase is the base URL tunnels are published under
+	PublicBase string
+
+	AllowClientNames bool
+
+	// ReservedNames can never be registered. Only consulted when
+	// AllowClientNames is set, since generated names cannot collide with them
+	ReservedNames []string
 }
 
-func NewServer(cfg Ports, defaultChannel string) *Server {
-	return &Server{
-		cfg:            cfg,
-		cm:             *NewChannelMap(),
-		rm:             *NewChannelMap(),
-		DefaultChannel: defaultChannel,
+type Server struct {
+	cfg              Ports
+	cm               ChannelMap // registered client channels, by channel name
+	rm               ChannelMap // public request connections, by request ID
+	allowClientNames bool
+	reserved         map[string]bool
+	publicScheme     string // "http" or "https"
+	publicHostPort   string // host with port if non-default, e.g. "localhost:3001"
+	baseHost         string // host without port
+}
+
+func NewServer(cfg Ports, opts Options) (*Server, error) {
+	base := opts.PublicBase
+	if base == "" {
+		base = DefaultPublicBase
 	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return nil, fmt.Errorf("invalid public base %q: %w", base, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("public base %q must start with http:// or https://", base)
+	}
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("public base %q has no host", base)
+	}
+
+	reserved := make(map[string]bool, len(opts.ReservedNames))
+	for _, n := range opts.ReservedNames {
+		if n = strings.ToLower(strings.TrimSpace(n)); n != "" {
+			reserved[n] = true
+		}
+	}
+
+	return &Server{
+		cfg:              cfg,
+		cm:               *NewChannelMap(),
+		rm:               *NewChannelMap(),
+		allowClientNames: opts.AllowClientNames,
+		reserved:         reserved,
+		publicScheme:     u.Scheme,
+		publicHostPort:   strings.ToLower(u.Host),
+		baseHost:         strings.ToLower(u.Hostname()),
+	}, nil
+}
+
+// tunnelURL is the public URL a channel is reachable at.
+func (s *Server) tunnelURL(name string) string {
+	return fmt.Sprintf("%s://%s.%s", s.publicScheme, name, s.publicHostPort)
 }
 
 // Setups and starts listener for a client connection
@@ -82,28 +134,95 @@ func (s *Server) handleClient(conn net.Conn) {
 			s.cm.rem(key)
 			return
 		}
-		if len(data) < 4 {
+		line := strings.TrimRight(data, "\r\n")
+		if len(line) < 3 {
 			continue
 		}
 
-		msg := data[:3]
-
-		if msg == config.ChannelRequest {
-			// Bounds check before slicing
-			if len(data) < 5 {
-				fmt.Fprintf(conn, "%s\n", config.ChannelTaken)
-				log.Println("Invalid frame format")
-				continue
-			}
-			key := data[4 : len(data)-1]
-			if err := s.cm.add(key, conn); err != nil {
-				fmt.Fprintf(conn, "%s\n", config.ChannelTaken)
-				log.Printf("Failed to register client: %v", err)
-			} else {
-				fmt.Fprintf(conn, "%s\n", config.ChannelSuccess)
-				log.Printf("Client %s registered", key)
-			}
+		if line[:3] != config.ChannelRequest {
+			log.Printf("Ignoring unknown frame %q", line[:3])
+			continue
 		}
+
+		// "SUB", "SUB:" and "SUB:<name>" are all valid. the first two ask the
+		// server to assign a name. Names are lowercased on the way in because
+		// hostnames are case-insensitive
+		requested, _ := strings.CutPrefix(line, config.ChannelRequest+":")
+		if requested == line {
+			requested = ""
+		}
+		s.register(conn, strings.ToLower(strings.TrimSpace(requested)))
+	}
+}
+
+// register resolves a channel name for conn and replies ACK or NAK. A client
+// may request a name, but whether that request is honored is server policy
+// when it is not, the client is given an assigned name rather than an error,
+// so the tunnel still comes up.
+func (s *Server) register(conn net.Conn, requested string) {
+	if existing, err := s.cm.getKey(conn); err == nil {
+		s.reject(conn, config.NakInvalid, fmt.Sprintf("connection is already registered as %q", existing))
+		return
+	}
+
+	if s.allowClientNames && requested != "" {
+		if err := validateChannelName(requested); err != nil {
+			s.reject(conn, config.NakInvalid, err.Error())
+			return
+		}
+		if s.reserved[requested] {
+			s.reject(conn, config.NakReserved, fmt.Sprintf("channel name %q is reserved", requested))
+			return
+		}
+		if err := s.cm.add(requested, conn); err != nil {
+			s.reject(conn, config.NakTaken, fmt.Sprintf("channel name %q is already in use", requested))
+			return
+		}
+		s.accept(conn, requested, requested)
+		return
+	}
+
+	// Assign a name. A collision is improbable rather than impossible, so the
+	// add is what claims the name and a clash just means trying again.
+	for range nameAttempts {
+		name, err := newChannelName()
+		if err != nil {
+			log.Printf("Failed to generate a channel name: %v", err)
+			s.reject(conn, config.NakInternal, "server could not assign a name")
+			return
+		}
+		if err := s.cm.add(name, conn); err == nil {
+			s.accept(conn, name, requested)
+			return
+		}
+	}
+	log.Printf("Gave up assigning a channel name after %d attempts", nameAttempts)
+	s.reject(conn, config.NakInternal, "server could not assign a free name")
+}
+
+// accept confirms a registration, handing the client the URL its tunnel is
+// published at. client cannot construct this itself, since the public
+// scheme and port are known only to the server.
+func (s *Server) accept(conn net.Conn, name, requested string) {
+	url := s.tunnelURL(name)
+	if _, err := fmt.Fprintf(conn, "%s:%s\n", config.ChannelSuccess, url); err != nil {
+		log.Printf("Failed to confirm registration of %s: %v", name, err)
+		s.cm.rem(name)
+		return
+	}
+	if requested != "" && requested != name {
+		log.Printf("Client requested %q; assigned %q", requested, name)
+	}
+	log.Printf("Client registered as %s (%s)", name, url)
+}
+
+// reject refuses a registration with a code and a message
+// meant for the user. Newlines are stripped because the frame is one line.
+func (s *Server) reject(conn net.Conn, code, msg string) {
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	log.Printf("Registration rejected (%s): %s", code, msg)
+	if _, err := fmt.Fprintf(conn, "%s:%s:%s\n", config.ChannelReject, code, msg); err != nil {
+		log.Printf("Failed to send rejection: %v", err)
 	}
 }
 
@@ -141,7 +260,19 @@ func (s *Server) StartPublic() {
 func (s *Server) handlePublic(conn net.Conn) {
 	buf := new(bytes.Buffer)
 	bufReader := bufio.NewReader(io.TeeReader(conn, buf))
-	key := extractSubdomain(bufReader, s.DefaultChannel)
+
+	host, ok := extractHost(bufReader)
+	if !ok {
+		sendHTTPResp(conn, 400, "Missing or malformed Host header")
+		conn.Close()
+		return
+	}
+	key, ok := channelFromHost(host, s.baseHost)
+	if !ok {
+		sendHTTPResp(conn, 404, fmt.Sprintf("No tunnel specified: this server publishes tunnels under *.%s", s.baseHost))
+		conn.Close()
+		return
+	}
 
 	clientConn, err := s.cm.get(key)
 	if err != nil {
@@ -189,33 +320,61 @@ func newRequestID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// extractSubdomain reads HTTP headers and extracts subdomain from Host header.
-// For localhost/127.0.0.1 (dev environments), it returns defaultChannel.
-func extractSubdomain(reader *bufio.Reader, defaultChannel string) string {
-	for {
+// maxHeaderLines bounds the header scan so a peer that never sends a blank
+// line cannot hold the goroutine open indefinitely.
+const maxHeaderLines = 100
+
+// extractHost scans request headers for the Host header, returning it
+// lowercased and without any port. ok is false when the request carries no
+// usable Host
+func extractHost(reader *bufio.Reader) (string, bool) {
+	for range maxHeaderLines {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return defaultChannel
+			return "", false
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
-			return defaultChannel // No Host header found
+			return "", false // end of headers, no Host
 		}
-		if strings.HasPrefix(strings.ToLower(line), "host:") {
-			host := strings.TrimPrefix(line[5:], " ")
-			if idx := strings.IndexByte(host, ':'); idx >= 0 {
-				host = host[:idx] // Remove port
-			}
-			// no subdomain to extract
-			if host == "localhost" || host == "127.0.0.1" {
-				log.Printf("Localhost detected, using default channel: %s", defaultChannel)
-				return defaultChannel
-			}
-			subdomain := strings.Split(host, ".")[0]
-			log.Printf("Extracted subdomain: %s", subdomain)
-			return subdomain
+
+		// Lowercase up front: the header name is case-insensitive, and so is
+		// the host, which is the map key everything downstream routes on.
+		rest, ok := strings.CutPrefix(strings.ToLower(line), "host:")
+		if !ok {
+			continue
 		}
+		host := strings.TrimSpace(rest)
+
+		// Strip the port, leaving IPv6 literals ("[::1]", "[::1]:3001") intact.
+		if i := strings.LastIndexByte(host, ':'); i >= 0 && !strings.HasSuffix(host, "]") {
+			host = host[:i]
+		}
+		host = strings.Trim(host, "[]")
+		if host == "" {
+			return "", false
+		}
+		return host, true
 	}
+	return "", false
+}
+
+// channelFromHost returns the channel a host routes to: the leftmost label of
+// a subdomain of baseHost. ok is false when the host names the server itself
+// rather than a tunnel, so that case can be answered rather than routed.
+func channelFromHost(host, baseHost string) (string, bool) {
+	suffix := "." + baseHost
+	if !strings.HasSuffix(host, suffix) {
+		return "", false // the apex itself, or a host this server does not serve
+	}
+	label := strings.TrimSuffix(host, suffix)
+	if i := strings.IndexByte(label, '.'); i >= 0 {
+		label = label[:i] // deeper subdomain: the leftmost label wins
+	}
+	if label == "" {
+		return "", false
+	}
+	return label, true
 }
 
 // BufferedConn wraps a net.Conn and replays buffered data before reading from underlying connection

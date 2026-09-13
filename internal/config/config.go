@@ -12,13 +12,25 @@ const (
 	DefaultPublicPort  = "3001"
 )
 
+// Channel-port verbs. Every frame is a single newline-terminated line whose
+// first three bytes name the verb; anything after the first ':' is payload, so
+// a payload may itself contain ':' (a tunnel URL does).
 const (
-	ChannelRequest = "SUB" // SUB:<ChannelId>
-	ChannelSuccess = "ACK"
-	ChannelTaken   = "TAK"
-	ChannelPublish = "PUB" // PUB:<RequestId>:<length>
+	ChannelRequest = "SUB" // SUB:<name>, or bare SUB / SUB: to be assigned one
+	ChannelSuccess = "ACK" // ACK:<url> on the channel port; bare ACK on the data port
+	ChannelReject  = "NAK" // NAK:<code>:<message>, registration refused
+	ChannelEnd     = "END" // END:<reason>, server is closing an established session
+	ChannelPublish = "PUB" // PUB:<RequestId>
 	ChannelError   = "ERR" // ERR:<RequestId>
-	// ChannelDataTransfer = "REQ"
+)
+
+// NAK codes. The client decides whether a retry is worthwhile from the code,
+// and shows the accompanying message to the user verbatim.
+const (
+	NakTaken    = "taken"    // name is in use, another name may work
+	NakInvalid  = "invalid"  // name is malformed, or the request made no sense
+	NakReserved = "reserved" // name is on the server's reserved list
+	NakInternal = "internal" // the server failed, through no fault of the client
 )
 
 const (

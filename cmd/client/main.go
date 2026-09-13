@@ -23,8 +23,8 @@ func envOrDefault(env, def string) string {
 // cleanServerHost reduces a user-supplied -server value to a bare host. The
 // client dials the channel/data ports over raw TCP, so a scheme, path, or
 // embedded port (which belong to the public HTTPS URL, not this connection)
-// would break the dial. We strip them so "https://cello.henock.me:443/foo"
-// becomes "cello.henock.me".
+// would break the dial. We strip them so "https://cello.example.com:443/foo"
+// becomes "cello.example.com".
 func cleanServerHost(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.Index(s, "://"); i >= 0 {
@@ -46,7 +46,7 @@ func cleanServerHost(s string) string {
 
 func main() {
 	// Priority: flag > env var > built-in default
-	name := flag.String("name", envOrDefault("CELLO_DEFAULT_CHANNEL", "myapp"), "a name for your channel")
+	name := flag.String("name", envOrDefault("CELLO_CHANNEL_NAME", ""), "a name for your channel; empty lets the server assign one")
 	port := flag.Int("port", 3000, "port number for your local server")
 	serverHost := flag.String("server", envOrDefault("CELLO_SERVER_HOST", "localhost"), "cello server hostname or IP")
 	channelPort := flag.String("channel-port", envOrDefault("CELLO_CHANNEL_PORT", config.DefaultChannelPort), "cello server channel port")
