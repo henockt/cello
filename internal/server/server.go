@@ -322,7 +322,8 @@ func (s *Server) handleTunnel(conn net.Conn, buf *bytes.Buffer, req preamble) {
 		conn.Close()
 		return
 	}
-	bufferedConn := &BufferedConn{Conn: conn, buffer: bytes.NewReader(buf.Bytes())}
+	replay := forceClose(buf.Bytes(), req.upgrade != "")
+	bufferedConn := &BufferedConn{Conn: conn, buffer: bytes.NewReader(replay)}
 
 	if err := s.rm.add(requestId, bufferedConn); err != nil {
 		sendHTTPResp(bufferedConn, 500, "Internal server error")
@@ -342,6 +343,33 @@ func (s *Server) handleTunnel(conn net.Conn, buf *bytes.Buffer, req preamble) {
 			expConn.Close()
 		}
 	}(requestId)
+}
+
+// forceClose rewrites the request headers so the local app closes the
+// connection after responding. the relay is raw TCP and cannot tell where a
+// response ends, so a front proxy that pools upstream connections would
+// otherwise send its next, unrelated request down this one while it is still
+// piped to the tunnel. that includes a client's own data upgrade, which then
+// never reaches handleData and its request times out with a 504.
+// upgrade requests (WebSockets) keep their headers: after the 101 the
+// connection belongs to that socket and is not reused anyway.
+func forceClose(raw []byte, upgrade bool) []byte {
+	end := bytes.Index(raw, []byte("\r\n\r\n"))
+	if upgrade || end < 0 {
+		return raw
+	}
+	lines := strings.Split(string(raw[:end]), "\r\n")
+	out := lines[:1:1] // request line. capped so append cannot overwrite lines
+	for _, l := range lines[1:] {
+		name, _, _ := strings.Cut(l, ":")
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "connection", "keep-alive", "proxy-connection":
+			continue // hop-by-hop, replaced below
+		}
+		out = append(out, l)
+	}
+	out = append(out, "Connection: close")
+	return append([]byte(strings.Join(out, "\r\n")), raw[end:]...)
 }
 
 // newRequestID returns a random, URL-safe request identifier
