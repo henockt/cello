@@ -518,7 +518,10 @@ func (s *Server) handleData(conn net.Conn, clientReader *bufio.Reader, _ preambl
 	// error
 	pubConn, err := s.rm.rem(reqId)
 	if err != nil {
+		// say why rather than just closing. the client is blocked waiting for
+		// the ACK, and a bare EOF there tells whoever reads the log nothing.
 		log.Printf("Request %s already timed out or unknown, dropping data connection", reqId)
+		fmt.Fprintf(conn, "%s:%s:request is unknown or already timed out\n", config.ChannelReject, config.NakInvalid)
 		return
 	}
 	defer pubConn.Close()

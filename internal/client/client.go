@@ -259,7 +259,7 @@ func handlePublish(reqId string, localPort string, server *serverAddr) {
 
 	ack, err := config.ReadFrame(servReader)
 	if err != nil {
-		log.Printf("Failed to read ACK from server: %v", err)
+		log.Printf("Failed to read ACK for request %s: %v", reqId, err)
 		return
 	}
 
