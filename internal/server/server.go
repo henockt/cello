@@ -29,6 +29,10 @@ const DefaultPublicBase = "http://localhost:3001"
 // behind a proxy this should be loopback only, e.g. "127.0.0.1:3001"
 const DefaultListen = ":3001"
 
+// DefaultApexRedirect sends anyone who opens the server's own host to the
+// project, rather than showing them a 404.
+const DefaultApexRedirect = "https://github.com/henockt/cello"
+
 // Ports holds the listen address. visitors and clients share it.
 type Ports struct {
 	Listen string
@@ -44,6 +48,10 @@ type Options struct {
 	// ReservedNames can never be registered. only checked for client-chosen
 	// names, generated ones are too long to collide
 	ReservedNames []string
+
+	// ApexRedirect is where a request for the server's own host is sent.
+	// empty serves the 404 instead.
+	ApexRedirect string
 }
 
 type Server struct {
@@ -55,6 +63,7 @@ type Server struct {
 	publicScheme     string // "http" or "https"
 	publicHostPort   string // host with port if non-default, e.g. "localhost:3001"
 	baseHost         string // host without port
+	apexRedirect     string
 }
 
 func NewServer(cfg Ports, opts Options) (*Server, error) {
@@ -80,6 +89,13 @@ func NewServer(cfg Ports, opts Options) (*Server, error) {
 		}
 	}
 
+	if r := opts.ApexRedirect; r != "" {
+		u, err := url.Parse(r)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("apex redirect %q must be an http or https URL", r)
+		}
+	}
+
 	return &Server{
 		cfg:              cfg,
 		cm:               *NewChannelMap(),
@@ -89,6 +105,7 @@ func NewServer(cfg Ports, opts Options) (*Server, error) {
 		publicScheme:     u.Scheme,
 		publicHostPort:   strings.ToLower(u.Host),
 		baseHost:         strings.ToLower(u.Hostname()),
+		apexRedirect:     opts.ApexRedirect,
 	}, nil
 }
 
@@ -280,7 +297,13 @@ func enableKeepAlive(conn net.Conn) {
 func (s *Server) handleTunnel(conn net.Conn, buf *bytes.Buffer, req preamble) {
 	key, ok := channelFromHost(req.host, s.baseHost)
 	if !ok {
-		sendHTTPResp(conn, 404, fmt.Sprintf("No tunnel specified: this server publishes tunnels under *.%s", s.baseHost))
+		// the server's own host is not a tunnel. point visitors somewhere
+		// useful if configured, and keep the 404 for hosts we do not serve.
+		if req.host == s.baseHost && s.apexRedirect != "" {
+			sendHTTPResp(conn, 302, s.apexRedirect, "Location", s.apexRedirect)
+		} else {
+			sendHTTPResp(conn, 404, fmt.Sprintf("No tunnel specified: this server publishes tunnels under *.%s", s.baseHost))
+		}
 		conn.Close()
 		return
 	}
@@ -370,8 +393,14 @@ func (bc *BufferedConn) Read(p []byte) (int, error) {
 	return bc.Conn.Read(p)
 }
 
-func sendHTTPResp(conn net.Conn, code int, msg string) {
-	resp := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s", code, http.StatusText(code), len(msg), msg)
+// sendHTTPResp writes a small response. extra is optional header name/value
+// pairs, for the few replies that need one.
+func sendHTTPResp(conn net.Conn, code int, msg string, extra ...string) {
+	var headers strings.Builder
+	for i := 0; i+1 < len(extra); i += 2 {
+		fmt.Fprintf(&headers, "%s: %s\r\n", extra[i], extra[i+1])
+	}
+	resp := fmt.Sprintf("HTTP/1.1 %d %s\r\n%sContent-Type: text/plain\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s", code, http.StatusText(code), headers.String(), len(msg), msg)
 	if _, err := conn.Write([]byte(resp)); err != nil {
 		log.Printf("Failed to send HTTP response: %v", err)
 	}

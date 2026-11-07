@@ -2,7 +2,9 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -170,5 +172,64 @@ func TestRegisterRejectsSecondNameOnSameConnection(t *testing.T) {
 	want := config.ChannelReject + ":" + config.NakInvalid + ":"
 	if !strings.HasPrefix(reply, want) {
 		t.Errorf("second registration reply = %q, want prefix %q", reply, want)
+	}
+}
+
+func TestApexRedirect(t *testing.T) {
+	s, err := NewServer(Ports{}, Options{PublicBase: testBase, ApexRedirect: "https://github.com/henockt/cello"})
+	if err != nil {
+		t.Fatalf("NewServer() failed: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		host     string
+		wantCode string
+	}{
+		{"apex redirects", "cello.example.com", "302"},
+		// a host this server does not publish is not the project's front door
+		{"unserved host still 404s", "somewhere.else.test", "404"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cli, srv := net.Pipe()
+			defer cli.Close()
+			cli.SetDeadline(time.Now().Add(5 * time.Second))
+			go s.handleTunnel(srv, new(bytes.Buffer), preamble{path: "/", host: tc.host})
+
+			head, err := io.ReadAll(cli)
+			if err != nil && len(head) == 0 {
+				t.Fatalf("reading the response failed: %v", err)
+			}
+			resp := string(head)
+			if !strings.Contains(resp, tc.wantCode) {
+				t.Errorf("response = %q, want status %s", resp, tc.wantCode)
+			}
+			if tc.wantCode == "302" && !strings.Contains(resp, "Location: https://github.com/henockt/cello") {
+				t.Errorf("302 has no Location header: %q", resp)
+			}
+		})
+	}
+}
+
+func TestApexRedirectDisabled(t *testing.T) {
+	s := testServer(t, false) // no ApexRedirect
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	cli.SetDeadline(time.Now().Add(5 * time.Second))
+	go s.handleTunnel(srv, new(bytes.Buffer), preamble{path: "/", host: "cello.example.com"})
+
+	head, _ := io.ReadAll(cli)
+	if !strings.Contains(string(head), "404") {
+		t.Errorf("without a redirect the apex should 404, got %q", head)
+	}
+}
+
+func TestNewServerRejectsBadApexRedirect(t *testing.T) {
+	for _, r := range []string{"github.com/henockt/cello", "javascript:alert(1)"} {
+		if _, err := NewServer(Ports{}, Options{PublicBase: testBase, ApexRedirect: r}); err == nil {
+			t.Errorf("NewServer accepted apex redirect %q", r)
+		}
 	}
 }

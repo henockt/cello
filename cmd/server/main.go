@@ -33,6 +33,7 @@ func main() {
 	listen := flag.String("listen", envOrDefault("CELLO_LISTEN", server.DefaultListen), "address to listen on, e.g. :3001 or 127.0.0.1:3001")
 	publicBase := flag.String("public-base", envOrDefault("CELLO_PUBLIC_BASE", server.DefaultPublicBase), "base URL tunnels are published under, e.g. https://cello.example.com")
 	allowClientNames := flag.Bool("allow-client-names", envBool("CELLO_ALLOW_CLIENT_NAMES", false), "let clients choose their own channel name")
+	apexRedirect := flag.String("apex-redirect", envOrDefault("CELLO_APEX_REDIRECT", server.DefaultApexRedirect), "where to send requests for the server's own host; empty serves a 404")
 	reservedNames := flag.String("reserved-names", envOrDefault("CELLO_RESERVED_NAMES", "www,api,admin,mail"), "comma-separated channel names that may never be registered")
 
 	flag.Parse()
@@ -43,6 +44,7 @@ func main() {
 		PublicBase:       *publicBase,
 		AllowClientNames: *allowClientNames,
 		ReservedNames:    strings.Split(*reservedNames, ","),
+		ApexRedirect:     *apexRedirect,
 	})
 	if err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
